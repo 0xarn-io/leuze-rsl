@@ -89,7 +89,16 @@ python3 examples/live_plot.py --port 3050              # polar live view (matplo
 ```
 
 All accept `--simulate` to run against the built-in simulator instead of
-hardware; the simulator also runs standalone:
+hardware. No checkout needed — the installed package also exposes a CLI that
+reads straight from hardware:
+
+```bash
+python3 -m leuze_rsl --port 3050 --count 10             # read RSL 235 UDT (real hardware)
+python3 -m leuze_rsl --rod 192.168.60.101               # read a ROD 308/508 over TCP
+python3 -m leuze_rsl --simulate                         # no hardware: built-in simulator
+```
+
+The simulator also runs standalone:
 
 ```bash
 python3 -m leuze_rsl.simulator --port 3050              # push UDT to 127.0.0.1:3050
