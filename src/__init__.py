@@ -1,9 +1,9 @@
-"""pyrsl235 -- Python driver for the Leuze RSL 235 measurement data output.
+"""leuze-rsl -- Python driver for the Leuze RSL measurement data output.
 
 Reads the scanner's UDP data telegrams ("UDT" / MDI packets) and exposes
 them as :class:`Scan` objects, plus the full TCP command interface for
 configuration and status.  Protocol reverse engineered from Leuze's official
-ROD x08 ROS2 driver (the RSL 235 data output speaks the same
+ROD x08 ROS2 driver (the RSL  data output speaks the same
 "ROD-300-500 communication protocol").
 """
 
