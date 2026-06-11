@@ -18,18 +18,18 @@ import sys
 from pathlib import Path
 
 try:
-    import pyrsl235
+    import leuze_rsl
 except ImportError:                       # allow running from the repo checkout
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import pyrsl235
+    import leuze_rsl
 
-from pyrsl235 import RSL235Udt
+from leuze_rsl import RSL235Udt
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--port", type=int, default=pyrsl235.DEFAULT_UDT_PORT,
+    parser.add_argument("--port", type=int, default=leuze_rsl.DEFAULT_UDT_PORT,
                         help="UDP destination port configured in the scanner "
                              "(default: %(default)s)")
     parser.add_argument("--source-ip", default=None,
@@ -46,7 +46,7 @@ def main() -> int:
 
     simulator = None
     if args.simulate:
-        from pyrsl235.simulator import UdtSimulator
+        from leuze_rsl.simulator import UdtSimulator
         simulator = UdtSimulator(target_port=args.port).start()
         print("UDT simulator pushing to 127.0.0.1:%d" % args.port)
 
@@ -81,7 +81,7 @@ def main() -> int:
                       % (status.operating_mode, status.error, status.alarm,
                          status.screen_contaminated, status.ossd_a, status.ossd_b))
             print("stats:", receiver.stats)
-    except (TimeoutError, pyrsl235.RSL235Error) as exc:
+    except (TimeoutError, leuze_rsl.RSL235Error) as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 1
     finally:

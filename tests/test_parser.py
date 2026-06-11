@@ -3,8 +3,8 @@
 import math
 import unittest
 
-from pyrsl235.parser import ScanAssembler
-from pyrsl235.protocol import MdiPacketType, build_packet
+from leuze_rsl.parser import ScanAssembler
+from leuze_rsl.protocol import MdiPacketType, build_packet
 
 
 def make_packet(sub, total, *, ptype=MdiPacketType.DISTANCE_AND_INTENSITY,

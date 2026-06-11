@@ -13,11 +13,11 @@ import sys
 from pathlib import Path
 
 try:
-    import pyrsl235  # noqa: F401
+    import leuze_rsl  # noqa: F401
 except ImportError:                       # allow running from the repo checkout
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pyrsl235.udt import FRAME_SIZE, StatusProfile, UdtFrame, locate_contour
+from leuze_rsl.udt import FRAME_SIZE, StatusProfile, UdtFrame, locate_contour
 
 ID_NAMES = {1: "status", 3: "dist+signal", 6: "distance"}
 

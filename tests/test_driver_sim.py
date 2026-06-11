@@ -4,7 +4,7 @@ import socket
 import time
 import unittest
 
-from pyrsl235 import (
+from leuze_rsl import (
     RSL235,
     CommandTimeoutError,
     MdiPacketType,
@@ -13,7 +13,7 @@ from pyrsl235 import (
     ScanDirection,
     ScannerConnectionError,
 )
-from pyrsl235.simulator import RSL235Simulator, SimulatorSettings
+from leuze_rsl.simulator import RSL235Simulator, SimulatorSettings
 
 
 def free_udp_port() -> int:

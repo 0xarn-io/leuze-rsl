@@ -5,8 +5,8 @@ import struct
 import time
 import unittest
 
-from pyrsl235.simulator import UdtSimulator
-from pyrsl235.udt import (
+from leuze_rsl.simulator import UdtSimulator
+from leuze_rsl.udt import (
     FRAME_SIZE,
     TELEGRAM_ID_DISTANCE,
     TELEGRAM_ID_DISTANCE_SIGNAL,

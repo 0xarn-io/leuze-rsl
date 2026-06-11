@@ -27,7 +27,7 @@ pip install .                      # from the repository root
 pip install . --no-build-isolation
 ```
 
-No install needed either: the package is pure Python — copy the `pyrsl235/`
+No install needed either: the package is pure Python — copy the `leuze_rsl/`
 folder next to your script, or run the examples straight from the checkout.
 
 ## Scanner setup (Sensor Studio)
@@ -45,7 +45,7 @@ folder next to your script, or run the examples straight from the checkout.
 ## Quickstart
 
 ```python
-from pyrsl235 import RSL235Udt
+from leuze_rsl import RSL235Udt
 
 with RSL235Udt(port=3050) as receiver:          # the port configured above
     scan = receiver.get_scan(timeout=5.0)       # one assembled scan cycle
@@ -85,7 +85,7 @@ All accept `--simulate` to run against the built-in simulator instead of
 hardware; the simulator also runs standalone:
 
 ```bash
-python3 -m pyrsl235.simulator --port 3050              # push UDT to 127.0.0.1:3050
+python3 -m leuze_rsl.simulator --port 3050              # push UDT to 127.0.0.1:3050
 ```
 
 ### Angle convention
@@ -152,7 +152,7 @@ default port 3050) plus big-endian `LEUZ`-sync **MDI packets** over UDP or
 TCP.
 
 ```python
-from pyrsl235 import RSL235
+from leuze_rsl import RSL235
 
 with RSL235("192.168.60.101") as scanner:   # TCP connect + config read
     scanner.start_measurement()              # sends "SendMDI"
@@ -163,7 +163,7 @@ with RSL235("192.168.60.101") as scanner:   # TCP connect + config read
 ```bash
 python3 examples/read_rod.py 192.168.60.101 --count 10   # scans (--simulate works)
 python3 examples/read_status.py 192.168.60.101           # full status dump
-python3 -m pyrsl235.simulator --rod --port 3050          # ROD-protocol simulator
+python3 -m leuze_rsl.simulator --rod --port 3050          # ROD-protocol simulator
 ```
 
 <details>

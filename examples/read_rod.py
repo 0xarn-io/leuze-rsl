@@ -16,12 +16,12 @@ import sys
 from pathlib import Path
 
 try:
-    import pyrsl235
+    import leuze_rsl
 except ImportError:                       # allow running from the repo checkout
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import pyrsl235
+    import leuze_rsl
 
-from pyrsl235 import RSL235
+from leuze_rsl import RSL235
 
 
 def main() -> int:
@@ -29,7 +29,7 @@ def main() -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("host", nargs="?", default="192.168.60.101",
                         help="scanner IP address (default: %(default)s)")
-    parser.add_argument("--port", type=int, default=pyrsl235.DEFAULT_PORT,
+    parser.add_argument("--port", type=int, default=leuze_rsl.DEFAULT_PORT,
                         help="scanner port (default: %(default)s)")
     parser.add_argument("--udp-port", type=int, default=None,
                         help="local UDP port for the data (default: same as --port)")
@@ -45,7 +45,7 @@ def main() -> int:
 
     simulator = None
     if args.simulate:
-        from pyrsl235.simulator import RSL235Simulator
+        from leuze_rsl.simulator import RSL235Simulator
         simulator = RSL235Simulator().start()
         args.host, args.port, args.udp_port = "127.0.0.1", simulator.port, None
         print("simulator running on 127.0.0.1:%d" % simulator.port)
@@ -74,7 +74,7 @@ def main() -> int:
                 print(line)
             scanner.stop_measurement()
             print("stats:", scanner.stats)
-    except (TimeoutError, pyrsl235.RSL235Error) as exc:
+    except (TimeoutError, leuze_rsl.RSL235Error) as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 1
     finally:

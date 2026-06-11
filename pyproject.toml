@@ -1,29 +1,31 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "leuze-rsl"
 version = "0.2.0"
+authors = [
+  { name = "0xarnio" },
+]
 description = "Python driver for the measurement data output (UDP data telegrams) of Leuze RSL 235 safety laser scanners"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 keywords = ["leuze", "rsl235", "rsl200", "rod300", "rod500", "laser scanner", "lidar", "agv", "udp"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Topic :: System :: Hardware :: Hardware Drivers",
 ]
 
 [project.urls]
+Homepage = "https://github.com/0xarn-io/leuze-rsl"
 Repository = "https://github.com/0xarn-io/leuze-rsl"
-
-[tool.setuptools]
-packages = ["leuze-rsl"]
+Issues = "https://github.com/0xarn-io/leuze-rsl/issues"
 
 [tool.setuptools.package-data]
-leuze-rsl = ["py.leuze-rsl"]
+leuze_rsl = ["py.typed"]

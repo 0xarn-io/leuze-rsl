@@ -3,7 +3,7 @@
 import struct
 import unittest
 
-from pyrsl235.protocol import (
+from leuze_rsl.protocol import (
     HEADER_SIZE,
     SYNC,
     MdiHeader,
