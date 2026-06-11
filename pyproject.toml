@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pyrsl235"
+name = "leuze-rsl"
 version = "0.2.0"
 description = "Python driver for the measurement data output (UDP data telegrams) of Leuze RSL 235 safety laser scanners"
 readme = "README.md"
@@ -20,10 +20,10 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/0xarn-io/pyrsl235"
+Repository = "https://github.com/0xarn-io/leuze-rsl"
 
 [tool.setuptools]
-packages = ["pyrsl235"]
+packages = ["leuze-rsl"]
 
 [tool.setuptools.package-data]
-pyrsl235 = ["py.typed"]
+leuze-rsl = ["py.leuze-rsl"]
