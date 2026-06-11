@@ -15,7 +15,7 @@ from pathlib import Path
 try:
     import leuze_rsl  # noqa: F401
 except ImportError:                       # allow running from the repo checkout
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from leuze_rsl.udt import FRAME_SIZE, StatusProfile, UdtFrame, locate_contour
 

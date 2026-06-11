@@ -18,7 +18,7 @@ from pathlib import Path
 try:
     import leuze_rsl
 except ImportError:                       # allow running from the repo checkout
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     import leuze_rsl
 
 from leuze_rsl import RSL235

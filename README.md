@@ -1,4 +1,4 @@
-# pyRSL235
+# leuze-rsl
 
 Pure-Python driver for the **measurement data output** of the Leuze **RSL 235**
 safety laser scanner — the **UDP data telegrams ("UDT")** used for AGV/AMR
@@ -22,20 +22,27 @@ command channel. The wire format is documented [below](#protocol-reference).
 ## Install
 
 ```bash
+pip install leuze-rsl
+```
+
+Or from a checkout of this repository:
+
+```bash
 pip install .                      # from the repository root
 # offline machine? avoid the PyPI round-trip:
 pip install . --no-build-isolation
 ```
 
-No install needed either: the package is pure Python — copy the `leuze_rsl/`
-folder next to your script, or run the examples straight from the checkout.
+No install needed either: the package is pure Python — copy `src/leuze_rsl/`
+next to your script (as `leuze_rsl/`), or run the examples straight from the
+checkout.
 
 ## Scanner setup (Sensor Studio)
 
 1. Open the scanner's configuration project, go to **SETTINGS → Data
    telegrams**.
 2. **Activate the UDP telegram** and set the **destination**: the IP of the
-   machine running pyRSL235 and a port (e.g. 3050).
+   machine running this driver and a port (e.g. 3050).
 3. Under **Measurement values in UDP telegram**, enable **measurement value
    transmission**; choose start/stop index, index interval and the data
    type — *Distance (ID 6)* or *Distance + signal strength (ID 3)*.
@@ -120,7 +127,7 @@ frame, **all fields little-endian**:
   `index_interval u16`, `reserved u16` → beams per scan
   `n = 1 + ceil((stop − start) / interval)`.
   *RSL 200 note:* the datagram is 56 bytes — 8 more than the RSL 400
-  document describes — so pyRSL235 locates the contour adaptively and
+  document describes — so the driver locates the contour adaptively and
   verifies it against the observed beam count.
 - **ID 6 — distance**: n × `u16` distance [mm].
 - **ID 3 — distance + signal strength**: n × (`u16` distance [mm] +
@@ -234,10 +241,11 @@ are fixed in this implementation.
 ## Tests
 
 ```bash
+pip install -e .                       # the src layout needs an install first
 python3 -m unittest discover -s tests -v
 ```
 
-61 tests cover both wire formats, the scan assemblers (corruption, loss,
+62 tests cover both wire formats, the scan assemblers (corruption, loss,
 resync, fragmentation, wraparound) and the full receivers/drivers against
 the simulators over real sockets — including frames replayed byte-for-byte
 from an RSL 235 hardware capture.
