@@ -44,6 +44,7 @@ from __future__ import annotations
 import logging
 import queue
 import socket
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -1028,10 +1029,13 @@ class RodScanner:
         # Same address family as the command connection so that source
         # addresses compare equal in verify_udp_source.  No SO_REUSEADDR: a
         # second receiver on this port must fail loudly instead of silently
-        # stealing the datagrams.
+        # stealing the datagrams (SO_EXCLUSIVEADDRUSE gives Windows the same
+        # guarantee, see RSL235Udt.start).
         sock: Optional[socket.socket] = None
         try:
             sock = socket.socket(tcp.family, socket.SOCK_DGRAM)
+            if sys.platform == "win32":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
             try:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
             except OSError:

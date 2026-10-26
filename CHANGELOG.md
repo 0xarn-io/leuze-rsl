@@ -41,7 +41,9 @@ angles and status fields decode differently (correctly) for an RSL 235.
   reports the failure as `ScannerConnectionError` until then.
 - `SO_REUSEADDR` removed from the UDP receive sockets: a second receiver on
   the same port now fails with `ScannerConnectionError` instead of silently
-  stealing the datagram stream.
+  stealing the datagram stream. On Windows the sockets set
+  `SO_EXCLUSIVEADDRUSE`, without which a wildcard bind succeeds next to a
+  socket holding the same port on a specific address.
 - `get_scan()` / `scans()` no longer block forever after `stop()`, `close()`
   or a lost connection; `get_scan(timeout=None)` is interruptible with
   Ctrl+C on Windows; scans buffered before a stop are not served after a

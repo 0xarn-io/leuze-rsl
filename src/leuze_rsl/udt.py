@@ -57,6 +57,7 @@ import math
 import queue
 import socket
 import struct
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -1022,6 +1023,12 @@ class RSL235Udt:
             try:
                 # No SO_REUSEADDR: a second receiver on the same port must
                 # fail loudly instead of silently stealing the datagrams.
+                # Windows only honours that with SO_EXCLUSIVEADDRUSE: by
+                # default it lets a wildcard bind succeed next to a socket
+                # holding the same port on a specific address, and lets a
+                # later SO_REUSEADDR socket hijack the port.
+                if sys.platform == "win32":
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
                 try:
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
                 except OSError:
