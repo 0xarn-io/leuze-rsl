@@ -117,6 +117,20 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(resp.name, "GetRange")
         self.assertEqual(resp.values, (-13760, 13760))
 
+    def test_parse_tolerates_surrounding_whitespace(self):
+        self.assertEqual(parse_response(b"cRA GetProto 0\r").values, (0,))
+        self.assertEqual(parse_response(b"cRA GetRange  -13760 13760 ").values, (-13760, 13760))
+        with self.assertRaises(ValueError):
+            parse_response(b"cRA GetTem +5")
+        with self.assertRaises(ValueError):
+            parse_response(b"cRA GetTem 1_000")
+
+    def test_build_packet_rejects_out_of_range_values(self):
+        with self.assertRaises(ValueError):
+            build_packet(packet_type=MdiPacketType.DISTANCE, packet_number=0, total_number=1,
+                         sub_number=1, scan_freq=80, first_angle_mdeg=0, delta_angle_mdeg=1,
+                         timestamp_ms=0, distances_mm=[70000])
+
     def test_parse_write_ack(self):
         resp = parse_response(b"cWA SendMDI")
         self.assertEqual(resp.kind, "cWA")

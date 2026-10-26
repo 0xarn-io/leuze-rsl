@@ -41,52 +41,60 @@ def main() -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING,
                         format="%(asctime)s %(name)s %(levelname)s: %(message)s")
 
     simulator = None
-    if args.simulate:
-        from leuze_rsl.simulator import UdtSimulator
-        simulator = UdtSimulator(target_port=args.port).start()
-        print("UDT simulator pushing to 127.0.0.1:%d" % args.port)
-
+    receiver = RSL235Udt(port=args.port, source_ip=args.source_ip)
     try:
-        with RSL235Udt(port=args.port, source_ip=args.source_ip) as receiver:
-            print("listening for UDP data telegrams on port %d ..." % args.port)
-            for i in range(args.count):
-                scan = receiver.get_scan(timeout=5.0)
-                valid = [d for d, ok in zip(scan.distances_mm, scan.valid_mask())
-                         if ok]
-                line = ("scan %10d: %4d beams in %d datagram(s)  "
-                        % (scan.scan_number, scan.num_beams, scan.num_blocks))
-                if valid:
-                    line += ("min %6.2f m  max %6.2f m  (%d no-echo)"
-                             % (min(valid) / 1000.0, max(valid) / 1000.0,
-                                scan.num_beams - len(valid)))
-                else:
-                    line += "no valid echoes"
-                if scan.signal_strengths is not None:
-                    line += "  signal[mid]=%d" % scan.signal_strengths[scan.num_beams // 2]
-                print(line)
+        receiver.start()                  # bind before the simulator starts pushing
+        if args.simulate:
+            from leuze_rsl.simulator import UdtSimulator
+            simulator = UdtSimulator(target_port=args.port).start()
+            print("UDT simulator pushing to 127.0.0.1:%d" % args.port)
+        print("listening for UDP data telegrams on port %d ..." % args.port)
+        scan = None
+        for _ in range(args.count):
+            scan = receiver.get_scan(timeout=5.0)
+            valid = [d for d, ok in zip(scan.distances_mm, scan.valid_mask()) if ok]
+            line = ("scan %10d: %4d beams in %d datagram(s)  "
+                    % (scan.scan_number, scan.num_beams, scan.num_blocks))
+            if valid:
+                line += ("min %6.2f m  max %6.2f m  (%d no-echo)"
+                         % (min(valid) / 1000.0, max(valid) / 1000.0,
+                            scan.num_beams - len(valid)))
+            else:
+                line += "no valid echoes"
+            if scan.signal_strengths:
+                line += "  signal[mid]=%d" % scan.signal_strengths[len(scan.signal_strengths) // 2]
+            print(line)
 
-            if receiver.contour is not None:
-                c = receiver.contour
-                print("contour: indices %d..%d step %d -> %d beams, "
-                      "angles %.1f..%.1f deg (assuming 275 deg FoV centered)"
-                      % (c.start_index, c.stop_index, c.index_interval,
-                         c.num_beams, scan.angles_deg()[0], scan.angles_deg()[-1]))
-            status = receiver.latest_status
-            if status is not None:
-                print("status: mode=%d error=%s alarm=%s screen=%s ossd_a=%s ossd_b=%s"
-                      % (status.operating_mode, status.error, status.alarm,
-                         status.screen_contaminated, status.ossd_a, status.ossd_b))
-            print("stats:", receiver.stats)
-    except (TimeoutError, leuze_rsl.RSL235Error) as exc:
+        if scan is not None and scan.contour is not None:
+            c = scan.contour
+            angles = scan.angles_deg()
+            print("contour: indices %d..%d step %d -> %d beams, angles %.1f..%.1f deg "
+                  "(%s geometry; verify against a known target)"
+                  % (c.start_index, c.stop_index, c.index_interval, c.num_beams,
+                     angles[0], angles[-1],
+                     scan.family.name if scan.family is not None else "default"))
+        status = receiver.latest_status
+        if status is not None:
+            print("status: family=%s mode=%d error=%s alarm=%s screen=%s ossd=%s "
+                  "protective_field_violated=%s warning_field_violated=%s"
+                  % (status.family.name if status.family is not None else "unknown",
+                     status.operating_mode, status.error, status.alarm,
+                     status.screen_contaminated, status.ossd_a,
+                     status.a_protective_violated, status.a_warning_violated))
+        print("stats:", receiver.stats)
+    except KeyboardInterrupt:
+        return 130
+    except (leuze_rsl.RSL235Error, OSError) as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 1
     finally:
         if simulator is not None:
             simulator.stop()
+        receiver.stop()
     return 0
 
 

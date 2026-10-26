@@ -2,22 +2,26 @@
 
 Pure-Python driver for the **measurement data output** of the Leuze **RSL 235**
 safety laser scanner — the **UDP data telegrams ("UDT")** used for AGV/AMR
-navigation.
+navigation. The RSL 400 series (RSL 425/445/455P) speaks the same protocol
+and is decoded as well.
 
 - No dependencies (Python ≥ 3.9, stdlib only), thread-based, type annotated
 - Receives and reassembles the scanner's UDP push stream: distances [mm],
-  signal strengths, beam angles, plus the safety **status profile** (OSSD
-  states, field violations, contamination, …)
-- Robust against lost datagrams and fragmented scans (never emits silently
-  truncated scans), wrap-aware scan numbering
+  signal strengths, beam angles, plus the safety **status profile** (OSSD,
+  protective/warning field violations, contamination, …) decoded per device
+  family exactly as the Leuze specification defines it
+- Strict by default: never emits a silently truncated, duplicated or stitched
+  scan (lost datagrams, late datagrams and scanner restarts are detected and
+  counted), wrap-aware scan numbering
 - Ships **protocol simulators** so everything works without hardware
-- Bonus: a full client for the ROD-300-500 protocol (Leuze ROD x08
+- Bonus: a full client for the ROD-300-500 protocol (Leuze ROD 308/508
   navigation scanners), see [below](#the-rod-300-500-protocol-rod-x08)
 
-**Verified against real RSL 235 hardware:** the device *pushes* UDP data
-telegrams in the format of the Leuze *RSL 400 UDP specification* (document
-50130122) to a destination configured in Sensor Studio — there is no TCP
-command channel. The wire format is documented [below](#protocol-reference).
+**Wire format:** the device *pushes* UDP data telegrams to a destination
+configured in Sensor Studio — there is no TCP command channel. The format
+follows the Leuze *RSL 200 / RSL 400 UDP specification* (document 50130122,
+EN 2024/10/01) and was verified against RSL 235 hardware; it is documented
+[below](#protocol-reference).
 
 ## Install
 
@@ -29,13 +33,13 @@ Or from a checkout of this repository:
 
 ```bash
 pip install .                      # from the repository root
-# offline machine? avoid the PyPI round-trip:
-pip install . --no-build-isolation
 ```
 
-No install needed either: the package is pure Python — copy `src/leuze_rsl/`
-next to your script (as `leuze_rsl/`), or run the examples straight from the
-checkout.
+The build needs `setuptools >= 77`; on an offline machine with an older
+system setuptools, build a wheel elsewhere (`python -m build`) and install
+that. No install needed either: the package is pure Python — copy
+`src/leuze_rsl/` next to your script (as `leuze_rsl/`), or run the examples
+straight from the checkout.
 
 ## Scanner setup (Sensor Studio)
 
@@ -55,30 +59,40 @@ checkout.
 from leuze_rsl import RSL235Udt
 
 with RSL235Udt(port=3050) as receiver:          # the port configured above
-    scan = receiver.get_scan(timeout=5.0)       # one assembled scan cycle
-    print(scan.scan_number,
-          scan.distances_mm[:5],                # [mm], 0 = no echo
-          scan.signal_strengths[:5],            # None for data type ID 6
+    scan = receiver.get_scan(timeout=5.0)       # one complete scan cycle
+    print(scan.scan_number, scan.family,        # e.g. ScannerFamily.RSL200
+          scan.distances_mm[:5],                # [mm], 32767 = no echo (RSL 200)
           scan.angles_deg()[:5])                # beam angles
-
-    status = receiver.latest_status             # safety status profile
-    print(status.ossd_a, status.a_protective_violated, status.error)
+    if scan.signal_strengths:                   # None for data type ID 6
+        print(scan.signal_strengths[:5])
+    if scan.status:                             # this cycle's safety status
+        print(scan.status.ossd_a, scan.status.a_protective_violated,
+              scan.status.error)
 ```
 
 Every `UdtScan` exposes:
 
 | attribute | meaning |
 |---|---|
-| `distances_mm` / `distances_m` | distance per beam (0 = no valid echo) |
+| `distances_mm` / `distances_m` | distance per beam; 0 or the family's no-echo value (RSL 200: 32767, RSL 400: 65535) = no valid echo |
 | `signal_strengths` | signal strength per beam [digits], or `None` |
-| `beam_indices()` / `angles_deg()` | beam geometry from the measurement contour |
+| `valid_mask()` | per beam: real measurement or not |
+| `beam_indices()` / `angles_deg()` | beam geometry from the measurement contour (see [angle convention](#angle-convention)) |
 | `to_cartesian()` | `(x, y)` points in meters, invalid beams skipped |
-| `scan_number`, `num_blocks`, `contour`, `status` | telegram metadata |
+| `scan_number`, `blocks`, `complete`, `contour`, `status`, `family` | telegram metadata; `status` is the status profile of *this* cycle (`None` if its telegram was lost) |
 
 Constructor knobs: `bind_address`, `source_ip` (ignore datagrams from other
-devices), `strict` (drop incomplete scans — default — or emit them short),
-`scan_queue_size`, `on_scan` / `on_status` callbacks, `data_timeout`
-(drives `receiver.is_receiving`). Diagnostics: `receiver.stats`.
+devices), `strict` (drop incomplete scans — default — or emit them with
+`complete=False`), `scan_queue_size`, `on_scan` / `on_status` callbacks,
+`data_timeout` (drives `receiver.is_receiving`). Diagnostics:
+`receiver.stats`, `receiver.latest_status`, `receiver.contour`,
+`receiver.family`.
+
+`get_scan()` raises `ScanTimeoutError` (also a `TimeoutError`) when nothing
+arrives in time and `ReceiverStoppedError` once the receiver is stopped;
+every exception of this package derives from `RSL235Error`. Only one
+receiver can bind a port: a second one fails with `ScannerConnectionError`
+instead of silently stealing the datagrams.
 
 ### Examples
 
@@ -95,27 +109,48 @@ reads straight from hardware:
 ```bash
 python3 -m leuze_rsl --port 3050 --count 10             # read RSL 235 UDT (real hardware)
 python3 -m leuze_rsl --rod 192.168.60.101               # read a ROD 308/508 over TCP
-python3 -m leuze_rsl --simulate                         # no hardware: built-in simulator
+python3 -m leuze_rsl --simulate                         # no hardware: built-in UDT simulator
+python3 -m leuze_rsl --rod --simulate                   # no hardware: built-in ROD simulator
 ```
 
 The simulator also runs standalone:
 
 ```bash
-python3 -m leuze_rsl.simulator --port 3050              # push UDT to 127.0.0.1:3050
+python3 -m leuze_rsl.simulator --port 3050              # push RSL 200 UDT to 127.0.0.1:3050
+python3 -m leuze_rsl.simulator --family rsl400 --port 3050
 ```
 
 ### Angle convention
 
-Beam *indices* step 0.1°; angles default to a 275° field of view centered on
-the device front (`angle = index * 0.1° − 137.5°`; the RSL 400 spans 270°,
-so use `angle_at_index0=-135.0` there). Verify against a known target and
-pass your own offset to `angles_deg()` / `to_cartesian()` if needed.
+The UDP specification defines only the beam *index* range: 0…1350 for the
+RSL 200 series and 0…2699 for the RSL 400 series. The angular step follows
+from the device's angular resolution (RSL 200: **0.2°** per index, RSL 400:
+**0.1°**), the field of view is 270° centred on the device front, and — as
+in Leuze's own RSL 400 ROS driver — index 0 lies at the counter-clockwise
+edge with indices increasing clockwise:
+
+| family (status profile type) | angle of beam index `i` |
+|---|---|
+| RSL 200 (type 21) | `135.0° − 0.2° · i` |
+| RSL 400 (type 1)  | `134.95° − 0.1° · i` |
+
+Angles are counter-clockwise positive in a right-handed frame (x forward,
+y left), which is what `to_cartesian()` uses; `index_resolution` is the
+*signed* step per index. The family is detected from the status telegram.
+Leuze's RSL 400 ROS driver maps the 2700 reversed indices onto exactly
+−135.0°…+134.9°; the defaults above centre the beams symmetrically instead
+(half a step apart). The RSL 200's measurement indices span 270° while its
+protective-field scanning angle is 275°. **Verify the mapping once against
+a known target** (the sign and offset of index 0 come from Leuze's RSL 400
+driver, not from the UDP document) and pass your own `angle_at_index0` /
+`index_resolution` to `angles_deg()` / `to_cartesian()` if your device or
+mounting differs.
 
 ## Protocol reference
 
-As specified in the Leuze *RSL 400 UDP specification* (50130122) and
-verified against RSL 235 hardware. Every datagram starts with a 20-byte
-frame, **all fields little-endian**:
+As specified in the Leuze *RSL 200 / RSL 400 UDP specification* (50130122,
+EN 2024/10/01) and verified against RSL 235 hardware. Every datagram starts
+with a 20-byte frame, **all fields little-endian**:
 
 | offset | size | field | description |
 |---|---|---|---|
@@ -128,28 +163,60 @@ frame, **all fields little-endian**:
 | 14 | 2 | `block` | fragment number within the scan (0…65535) |
 | 16 | 4 | `scan_number` | scan cycle counter (wraps at 2³²) |
 
-- **ID 1 — extended status profile** (sent once per scan cycle): 20-byte
-  status profile (operating mode; ERROR/ALARM/contamination flags; OSSD A/B;
-  protective/warning field violations and field-pair selections for
-  functions A and B; embedded scan number) followed by the 8-byte
-  **measurement contour description**: `start_index u16`, `stop_index u16`,
-  `index_interval u16`, `reserved u16` → beams per scan
-  `n = 1 + ceil((stop − start) / interval)`.
-  *RSL 200 note:* the datagram is 56 bytes — 8 more than the RSL 400
-  document describes — so the driver locates the contour adaptively and
-  verifies it against the observed beam count.
-- **ID 6 — distance**: n × `u16` distance [mm].
-- **ID 3 — distance + signal strength**: n × (`u16` distance [mm] +
-  `u16` signal strength [digits]).
-- Large scans are split across datagrams with consecutive `block` numbers;
-  all datagrams of one cycle share the `scan_number`.
-- **No-echo sentinel:** real RSL 235 hardware reports **32767 mm** (0x7FFF)
-  for beams without a valid echo (0 also counts as invalid). Use
-  `scan.valid_mask()`; `to_cartesian()` skips these automatically. The
-  RSL 235 measures 0.08…25 m.
+**ID 1 — extended status profile**, sent once per scan cycle before the
+measurement data: a status profile whose layout is identified by its first
+byte, followed by the 8-byte **measurement contour description**
+`start_index u16, stop_index u16, index_interval u16, reserved u16`
+(all zero when measurement transmission is inactive) → beams per scan
+`n = 1 + ceil((stop − start) / interval)`.
 
-A capture from real hardware (56-byte status + single 1104-byte
-distance+signal datagram = 271 beams per cycle):
+*RSL 200 series (RSL 235), type 21 — 56-byte datagram (20 + 28 + 8):*
+
+| byte | content (spec table 3.3) |
+|---|---|
+| 0 | profile type = 21 |
+| 1 | operating mode: 0 not configured, 1 safety, 2 simulation |
+| 2 | bit 7 ERROR, 6 WARNING, 5 SCREEN (contamination), 4 EDM, 3 FIELD TRIPLE error, 2 SCREEN_ERROR, 1 SCREEN_WARNING |
+| 3 | bit 7 OSSD, 6 PF_VIO, 5 WF_VIO_1, 4 WF_VIO_2 (field bits: **0 = violated, 1 = free**), 3 RES (restart interlock), 2 CLEAR, 1 PARK |
+| 4 | selected field triple (1…32) |
+| 5 | bit 0 SSREC |
+| 6 / 7 | control inputs IN1…IN8 / outputs OUT1…OUT8 (bit 0 = 1) |
+| 8–9 / 10–11 | VOLT (u16, spec: 0.1 mV) / TEMP (u16, 0.1 °C) |
+| 12–15 | reserved |
+| 16–19 | SCAN_NUM (u32; expected to equal the frame's scan number, as observed on RSL 400 captures — the driver keys status on the frame's number) |
+| 20–23 | SAFE_SIG |
+| 24 / 25–26 | error class / error number |
+| 28–35 | measurement contour description; indices 0…1350, interval 1…8 |
+
+*RSL 400 series, type 1 — 48-byte datagram (20 + 20 + 8), or 60 bytes with
+the optional 12-byte configuration signature trailer (`01 00 08 00` + 8
+bytes, firmware ≥ 5.6):*
+
+| byte | content (spec table 3.5) |
+|---|---|
+| 0 / 1 | profile type = 1 / operating mode |
+| 2 | bit 7 ERROR, 6 ALARM, 5 SCREEN, 4 EDM, 3 FIELD PAIR error, 2 E-STOP error, 1 A-OSSD, 0 B-OSSD |
+| 3 | bit 7 status input SE (E-STOP), 6 PARK |
+| 4–7 | electrical signals (control/restart/EDM inputs, outputs) |
+| 8–11 | scan number (u32, equals the frame's scan number) |
+| 12 | bit 7 A-ACTIVE, 6 A-WF-VIO, 5 A-PF-VIO (**0 = violation, 1 = free**; the driver reports `*_violated` only while the function is active), 4 A-RES, … |
+| 13 | bits 7–4 selected bank A, bits 3–0 first selected field pair A |
+| 14 | bits 7–4 second selected field pair A (overlapping fields) |
+| 15 | segment indication signals A |
+| 16–19 | the same for protective function B |
+| 20–27 | measurement contour description; indices 0…2699, interval 1…8 |
+
+**ID 6 — distance**: n × `u16` distance [mm]. **ID 3 — distance + signal
+strength**: n × (`u16` distance [mm] + `u16` signal strength [digits]).
+Large scans are split across datagrams with consecutive `block` numbers;
+all datagrams of one cycle share the `scan_number`. Distances: RSL 200
+0…32767 mm, RSL 400 0…65535 mm; real RSL 235 hardware reports **32767**
+(0x7FFF) for beams without a valid echo and 0 also counts as invalid
+(`scan.valid_mask()`, `scan.no_echo_mm`).
+
+A capture from real RSL 235 hardware (56-byte status + single 1104-byte
+distance+signal datagram = 271 beams per cycle, i.e. the full-range contour
+0…1350 step 5):
 
 ```
 38 00 00 00 08 00 06 00 04 0b 01 32 01 00 00 00 ...   ID 1, 56 B
@@ -162,16 +229,16 @@ distance+signal datagram = 271 beams per cycle):
 
 The package also contains a complete client for the protocol used by Leuze
 **ROD 308 / ROD 508** navigation scanners (reverse engineered from Leuze's
-official [RODx00 ROS2 driver](https://github.com/thesensorpeople/leuze_rod_ros2_drivers)):
-an STX/ETX-framed **TCP command interface** (`cWN SendMDI`, `cRN GetRange`, …
-default port 3050) plus big-endian `LEUZ`-sync **MDI packets** over UDP or
-TCP.
+official [RODx00 ROS2 driver](https://github.com/thesensorpeople/leuze_rod_ros2_drivers);
+*not* what an RSL 235 speaks): an STX/ETX-framed **TCP command interface**
+(`cWN SendMDI`, `cRN GetRange`, … default port 3050) plus big-endian
+`LEUZ`-sync **MDI packets** over UDP or TCP.
 
 ```python
-from leuze_rsl import RSL235
+from leuze_rsl import RodScanner          # RSL235 is kept as a deprecated alias
 
-with RSL235("192.168.60.101") as scanner:   # TCP connect + config read
-    scanner.start_measurement()              # sends "SendMDI"
+with RodScanner("192.168.60.101") as scanner:   # TCP connect + config read
+    scanner.start_measurement()                  # sends "SendMDI"
     scan = scanner.get_scan(timeout=5.0)
     print(scanner.get_temperature(), scanner.get_status())
 ```
@@ -181,6 +248,12 @@ python3 examples/read_rod.py 192.168.60.101 --count 10   # scans (--simulate wor
 python3 examples/read_status.py 192.168.60.101           # full status dump
 python3 -m leuze_rsl.simulator --rod --port 3050          # ROD-protocol simulator
 ```
+
+`Scan.valid_mask()` marks spots with distance 0 or (when transmitted) an
+intensity below 32 as invalid, following the reference driver. Commands may
+be issued from the `on_scan` callback; the driver never delivers scans on the
+thread that reads command replies. A lost connection wakes `get_scan()` with
+`NotConnectedError`; `connect()` on the same object reconnects.
 
 <details>
 <summary>ROD-300-500 protocol reference (click to expand)</summary>
@@ -216,7 +289,9 @@ ASCII commands framed by `STX` (0x02) and `ETX` (0x03), e.g.
 Startup sequence: TCP connect → `StopMDI` (handshake) → read settings →
 bind the local UDP port (same number as the TCP port) → `SendMDI`. With
 `GetProto == TCP` the MDI packets arrive interleaved with command replies
-on the same TCP socket; the driver demultiplexes them.
+on the same TCP socket; the driver demultiplexes them. The protocol has no
+sequence numbers: a reply that arrives after its command timed out is
+discarded unless the same command is pending again.
 
 ### MDI measurement packets
 
@@ -242,8 +317,9 @@ Payload: `scan_spots` × u16 distances [mm], then `scan_spots` × u16
 intensities (valid 32…4095) when `packet_type == 1`. Angles are scanner
 native; Leuze's ROS driver negates them for REP-103. The reference C++
 driver's weaknesses (infinite loop on `packet_size == 0`, command replies
-lost across TCP segment boundaries, partial-scan emission, UDP bind race)
-are fixed in this implementation.
+lost across TCP segment boundaries, partial-scan emission, stitching of two
+rotations after a burst loss, UDP bind race) are fixed in this
+implementation.
 
 </details>
 
@@ -254,15 +330,17 @@ pip install -e .                       # the src layout needs an install first
 python3 -m unittest discover -s tests -v
 ```
 
-62 tests cover both wire formats, the scan assemblers (corruption, loss,
-resync, fragmentation, wraparound) and the full receivers/drivers against
-the simulators over real sockets — including frames replayed byte-for-byte
-from an RSL 235 hardware capture.
+The suite covers both wire formats byte for byte (including frames replayed
+from an RSL 235 hardware capture and an RSL 400 capture from Leuze's ROS
+driver), the scan assemblers (corruption, loss, duplicates, resync,
+fragmentation, wraparound, scanner restart) and the full receivers/drivers
+against the simulators over real sockets, on Python 3.9 – 3.13. CI runs it
+on Linux, macOS and Windows.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). The ROD-300-500 protocol was reverse
-engineered from Leuze's Apache-2.0 licensed ROS2 driver (© 2025 Leuze
-electronic GmbH + Co. KG); the UDT format follows Leuze document 50130122.
-No Leuze code is included. This project is not affiliated with or endorsed
-by Leuze.
+MIT — see [LICENSE](https://github.com/0xarn-io/leuze-rsl/blob/main/LICENSE).
+The ROD-300-500 protocol was reverse engineered from Leuze's Apache-2.0
+licensed ROS2 driver (© 2025 Leuze electronic GmbH + Co. KG); the UDT
+format follows Leuze document 50130122. No Leuze code is included. This
+project is not affiliated with or endorsed by Leuze.

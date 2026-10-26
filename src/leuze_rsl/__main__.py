@@ -5,109 +5,172 @@ Run directly from an installed package, no checkout needed::
     python -m leuze_rsl --port 3050 --count 10        # RSL 235 UDT (default)
     python -m leuze_rsl --rod 192.168.60.101          # ROD 308/508 TCP client
     python -m leuze_rsl --simulate                    # built-in simulator
+    python -m leuze_rsl --rod --simulate              # built-in ROD simulator
 
 For the default (UDT) mode the scanner must be configured in Sensor Studio to
 push its UDP telegram to this machine's IP on the given port. For ``--rod`` the
 tool connects to the scanner at the supplied IP over TCP.
+
+Exit codes: 0 success, 1 error, 2 usage error, 130 interrupted (Ctrl+C).
 """
+
+from __future__ import annotations
 
 import argparse
 import logging
 import sys
+from typing import Any, List, Optional
 
-from . import DEFAULT_UDT_PORT, RSL235Error, RSL235Udt
+from .errors import RSL235Error
+from .udt import DEFAULT_UDT_PORT, RSL235Udt
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_INTERRUPTED = 130
 
 
 def _run_udt(args: argparse.Namespace) -> int:
-    simulator = None
-    if args.simulate:
-        from .simulator import UdtSimulator
-        simulator = UdtSimulator(target_port=args.port).start()
-        print("UDT simulator pushing to 127.0.0.1:%d" % args.port)
+    simulator: Any = None
+    receiver = RSL235Udt(port=args.port, source_ip=args.source_ip)
     try:
-        with RSL235Udt(port=args.port, source_ip=args.source_ip) as receiver:
-            print("listening for UDP data telegrams on port %d ..." % args.port)
-            for _ in range(args.count):
-                scan = receiver.get_scan(timeout=args.timeout)
-                valid = [d for d, ok in zip(scan.distances_mm, scan.valid_mask())
-                         if ok]
-                line = ("scan %10d: %4d beams in %d datagram(s)  "
-                        % (scan.scan_number, scan.num_beams, scan.num_blocks))
-                if valid:
-                    line += ("min %6.2f m  max %6.2f m  (%d no-echo)"
-                             % (min(valid) / 1000.0, max(valid) / 1000.0,
-                                scan.num_beams - len(valid)))
-                else:
-                    line += "no valid echoes"
-                if scan.signal_strengths is not None:
-                    line += ("  signal[mid]=%d"
-                             % scan.signal_strengths[scan.num_beams // 2])
-                print(line)
-            status = receiver.latest_status
-            if status is not None:
-                print("status: mode=%d error=%s ossd_a=%s ossd_b=%s"
-                      % (status.operating_mode, status.error,
-                         status.ossd_a, status.ossd_b))
-            print("stats:", receiver.stats)
-    except (TimeoutError, RSL235Error) as exc:
-        print("error: %s" % exc, file=sys.stderr)
-        return 1
+        receiver.start()            # bind before the simulator starts pushing
+        if args.simulate:
+            from .simulator import UdtSimulator
+            simulator = UdtSimulator(target_port=args.port).start()
+            print("UDT simulator pushing to 127.0.0.1:%d" % args.port)
+        print("listening for UDP data telegrams on port %d ..." % args.port)
+        for _ in range(args.count):
+            scan = receiver.get_scan(timeout=args.timeout)
+            valid = [d for d, ok in zip(scan.distances_mm, scan.valid_mask()) if ok]
+            line = ("scan %10d: %4d beams in %d datagram(s)  "
+                    % (scan.scan_number, scan.num_beams, scan.num_blocks))
+            if valid:
+                line += ("min %6.2f m  max %6.2f m  (%d no-echo)"
+                         % (min(valid) / 1000.0, max(valid) / 1000.0,
+                            scan.num_beams - len(valid)))
+            else:
+                line += "no valid echoes"
+            if scan.signal_strengths:
+                line += "  signal[mid]=%d" % scan.signal_strengths[len(scan.signal_strengths) // 2]
+            print(line)
+        status = receiver.latest_status
+        if status is not None:
+            print("status: family=%s mode=%d error=%s ossd=%s protective_field_violated=%s"
+                  % (status.family.name if status.family is not None else "unknown",
+                     status.operating_mode, status.error, status.ossd_a,
+                     status.a_protective_violated))
+        contour = receiver.contour
+        if contour is not None:
+            print("contour: indices %d..%d step %d -> %d beams"
+                  % (contour.start_index, contour.stop_index,
+                     contour.index_interval, contour.num_beams))
+        print("stats:", receiver.stats)
     finally:
         if simulator is not None:
             simulator.stop()
-    return 0
+        receiver.stop()
+    return EXIT_OK
 
 
 def _run_rod(args: argparse.Namespace) -> int:
-    from . import RSL235
+    from .driver import RSL235
+    simulator: Any = None
+    host, port, udp_port = args.rod, args.port, args.udp_port
+    if args.simulate:
+        from .simulator import RSL235Simulator
+        simulator = RSL235Simulator().start()
+        host, port, udp_port = "127.0.0.1", simulator.port, None
+        print("ROD simulator listening on 127.0.0.1:%d" % simulator.port)
     try:
-        with RSL235(args.rod, port=args.port) as scanner:
+        with RSL235(host, port=port, udp_port=udp_port) as scanner:
             scanner.start_measurement()
-            print("connected to %s, reading %d scans ..."
-                  % (args.rod, args.count))
+            print("connected to %s:%d, reading %d scans ..." % (host, port, args.count))
             for _ in range(args.count):
                 scan = scanner.get_scan(timeout=args.timeout)
-                valid = [d for d in scan.distances_mm if d > 0]  # 0 = no echo
-                line = ("scan #%d: %4d spots  "
-                        % (scan.packet_number, scan.num_spots))
-                line += (("min %6.2f m  max %6.2f m  (%d no-echo)"
+                valid = [d for d, ok in zip(scan.distances_mm, scan.valid_mask()) if ok]
+                line = ("packet #%5d: %4d spots  t=%5d ms  "
+                        % (scan.packet_number, scan.num_spots, scan.timestamp_ms))
+                line += (("min %6.2f m  max %6.2f m  (%d invalid)"
                           % (min(valid) / 1000.0, max(valid) / 1000.0,
                              scan.num_spots - len(valid)))
                          if valid else "no valid echoes")
                 print(line)
-    except (TimeoutError, RSL235Error) as exc:
-        print("error: %s" % exc, file=sys.stderr)
-        return 1
-    return 0
+            print("stats:", scanner.stats)
+    finally:
+        if simulator is not None:
+            simulator.stop()
+    return EXIT_OK
 
 
-def main(argv=None) -> int:
+def _port(text: str) -> int:
+    value = int(text)
+    if not 1 <= value <= 65535:
+        raise argparse.ArgumentTypeError("port must be in 1..65535")
+    return value
+
+
+def _non_negative_int(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return value
+
+
+def _positive_float(text: str) -> float:
+    value = float(text)
+    if not value > 0:
+        raise argparse.ArgumentTypeError("must be > 0")
+    return value
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m leuze_rsl",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--rod", metavar="IP", default=None,
-                        help="connect to a ROD 308/508 scanner at this IP over "
-                             "TCP instead of listening for RSL 235 UDT")
-    parser.add_argument("--port", type=int, default=DEFAULT_UDT_PORT,
-                        help="UDT destination port, or ROD TCP port "
+    parser.add_argument("--rod", metavar="IP", nargs="?", const="192.168.60.101", default=None,
+                        help="connect to a ROD 308/508 scanner at this IP over TCP "
+                             "(default IP: %(const)s) instead of listening for RSL UDT")
+    parser.add_argument("--port", type=_port, default=DEFAULT_UDT_PORT,
+                        help="UDT destination port, or ROD TCP command port "
                              "(default: %(default)s)")
+    parser.add_argument("--udp-port", type=_port, default=None,
+                        help="ROD mode: local UDP port for the measurement data "
+                             "(default: same as --port)")
     parser.add_argument("--source-ip", default=None,
                         help="UDT mode: only accept datagrams from this scanner IP")
-    parser.add_argument("--count", type=int, default=10,
+    parser.add_argument("--count", type=_non_negative_int, default=10,
                         help="number of scans to read (default: %(default)s)")
-    parser.add_argument("--timeout", type=float, default=5.0,
+    parser.add_argument("--timeout", type=_positive_float, default=5.0,
                         help="per-scan timeout in seconds (default: %(default)s)")
     parser.add_argument("--simulate", action="store_true",
-                        help="UDT mode: run against the built-in simulator")
-    parser.add_argument("-v", "--verbose", action="store_true")
+                        help="run against the built-in simulator instead of hardware")
+    parser.add_argument("-v", "--verbose", action="count", default=0,
+                        help="log library messages (-v: info, -vv: debug)")
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
+    if args.rod is None and args.udp_port is not None:
+        parser.error("--udp-port only applies to --rod mode")
+    if args.rod is not None and args.source_ip is not None:
+        parser.error("--source-ip only applies to UDT mode")
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s: %(message)s")
+    level = logging.WARNING if args.verbose == 0 else (
+        logging.INFO if args.verbose == 1 else logging.DEBUG)
+    logging.basicConfig(level=level,
+                        format="%(asctime)s %(name)s %(levelname)s: %(message)s")
 
-    return _run_rod(args) if args.rod else _run_udt(args)
+    try:
+        return _run_rod(args) if args.rod is not None else _run_udt(args)
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return EXIT_INTERRUPTED
+    except (RSL235Error, OSError) as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":

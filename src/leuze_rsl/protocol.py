@@ -1,9 +1,11 @@
-"""Wire-protocol definitions for the Leuze RSL 235 measurement data output.
+"""Wire-protocol definitions of the Leuze ROD-300-500 communication protocol.
 
-The RSL 235 (RSL 200 series safety laser scanner with measurement data
-output) speaks the "ROD-300-500 communication protocol".  Everything in this
+This is the protocol of the Leuze **ROD 308 / ROD 508** navigation scanners
+(ROD x08).  It is *not* what an RSL 235 speaks -- the RSL safety scanners
+push UDP data telegrams, see :mod:`leuze_rsl.udt`.  Everything in this
 module was reverse engineered from Leuze's official ROD x08 ROS2 driver
-(``leuze_rod_ros2_drivers``, Apache-2.0), which ships with this repository.
+(``leuze_rod_ros2_drivers``, Apache-2.0, https://github.com/thesensorpeople/
+leuze_rod_ros2_drivers); no Leuze code is included in this package.
 
 The protocol has two parts:
 
@@ -11,19 +13,32 @@ The protocol has two parts:
   strings framed by STX (0x02) and ETX (0x03), e.g. ``<STX>cWN SendMDI<ETX>``.
   Replies use ``cWA``/``cRA`` followed by space separated decimal values.
 
-* **MDI packets** ("measurement data interface" -- the UDP data telegrams)
-  carrying distances and optionally signal strengths.  They are pushed by the
-  scanner either as UDP datagrams (to the command client's IP, same port
-  number) or interleaved on the TCP command socket.  All multi-byte fields
-  are big-endian.
+* **MDI packets** ("measurement data interface") carrying distances and
+  optionally signal strengths.  They are pushed by the scanner either as UDP
+  datagrams (to the command client's IP, same port number) or interleaved on
+  the TCP command socket.  All multi-byte fields are big-endian.
 """
 
 from __future__ import annotations
 
+import re
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple, Union
+
+from .errors import ProtocolError
+
+__all__ = [
+    "STX", "ETX", "DEFAULT_PORT", "MAX_RESPONSE_LENGTH",
+    "VERB_WRITE", "VERB_READ", "ACK_WRITE", "ACK_READ",
+    "CommandResponse", "frame_command", "parse_response", "find_response_start",
+    "MdiProtocol", "MdiPacketType", "ScanDirection", "Resolution", "FilterType",
+    "WindowCalibration", "ANGLE_MIN_CDEG", "ANGLE_MAX_CDEG",
+    "INTENSITY_MIN_VALID", "INTENSITY_MAX",
+    "SYNC", "HEADER_FORMAT", "HEADER_SIZE", "MdiHeader", "MdiPacket",
+    "parse_packet", "build_packet", "expected_spots",
+]
 
 # ---------------------------------------------------------------------------
 # Command interface framing
@@ -68,6 +83,9 @@ VERB_READ = "cRN"
 ACK_WRITE = "cWA"
 ACK_READ = "cRA"
 
+_COMMAND_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
+_DECIMAL = re.compile(r"^-?[0-9]+$")
+
 
 def frame_command(verb: str, name: str) -> bytes:
     """Frame a command for the TCP command interface.
@@ -75,6 +93,10 @@ def frame_command(verb: str, name: str) -> bytes:
     >>> frame_command("cWN", "SendMDI")
     b'\\x02cWN SendMDI\\x03'
     """
+    if verb not in (VERB_WRITE, VERB_READ):
+        raise ValueError("unknown command verb %r" % verb)
+    if not _COMMAND_NAME.match(name):
+        raise ValueError("invalid command name %r" % name)
     return STX + verb.encode("ascii") + b" " + name.encode("ascii") + ETX
 
 
@@ -88,27 +110,35 @@ class CommandResponse:
     raw: str                #: the full response body (without STX/ETX)
 
 
-def parse_response(body: bytes) -> CommandResponse:
+def parse_response(body: Union[bytes, bytearray]) -> CommandResponse:
     """Parse the body of a response (the bytes between STX and ETX).
 
-    Raises ``ValueError`` if the body is not a well formed response.
+    The body is ``<kind> <name>[ <value>...]``: whitespace-separated tokens
+    (the reference driver splits on single spaces; surrounding or repeated
+    whitespace is tolerated here) whose values are plain decimal integers
+    with an optional leading minus.  Raises :class:`ProtocolError` (a
+    ``ValueError``) otherwise.
     """
-    text = body.decode("ascii", errors="replace")
-    tokens = text.split()
-    if len(tokens) < 2 or tokens[0] not in (ACK_READ, ACK_WRITE):
-        raise ValueError("not a command interface response: %r" % text)
     try:
-        values = tuple(int(tok) for tok in tokens[2:])
-    except ValueError:
-        raise ValueError("non-numeric value in response: %r" % text)
-    return CommandResponse(kind=tokens[0], name=tokens[1], values=values, raw=text)
+        text = bytes(body).decode("ascii")
+    except UnicodeDecodeError:
+        raise ProtocolError("non-ASCII response body: %r" % (bytes(body),)) from None
+    tokens = text.split()
+    if len(tokens) < 2 or tokens[0] not in (ACK_READ, ACK_WRITE) or not _COMMAND_NAME.match(tokens[1]):
+        raise ProtocolError("not a command interface response: %r" % text)
+    values: List[int] = []
+    for tok in tokens[2:]:
+        if not _DECIMAL.match(tok):
+            raise ProtocolError("non-numeric value in response: %r" % text)
+        values.append(int(tok))
+    return CommandResponse(kind=tokens[0], name=tokens[1], values=tuple(values), raw=text)
 
 
 #: Byte values allowed in position 2 of a response signature ("R" or "W").
 _RESPONSE_KINDS = frozenset(b"RW")
 
 
-def find_response_start(buf: "bytes | bytearray", start: int = 0) -> int:
+def find_response_start(buf: Union[bytes, bytearray], start: int = 0) -> int:
     """Find the next command-interface response signature in ``buf``.
 
     The signature is the 5-byte sequence ``STX 'c' ('R'|'W') 'A' ' '``.
@@ -211,9 +241,28 @@ ANGLE_MIN_CDEG = -13760
 ANGLE_MAX_CDEG = 13760
 
 # Intensity (signal strength) values below this indicate an invalid /
-# undefined measurement; the maximum reported value is 4095.
+# undefined measurement (reference driver: "valid range is 32 - 4095").
 INTENSITY_MIN_VALID = 32
 INTENSITY_MAX = 4095
+
+
+def expected_spots(angle_min_cdeg: int, angle_max_cdeg: int,
+                   resolution_deg: float, skip_spots: int = 0) -> int:
+    """Spots per scan implied by the settings (shared by driver and simulator).
+
+    ``1 + floor(span / (resolution * (skip_spots + 1)))``: the spots at
+    ``angle_min + k * step`` that lie within the configured range, computed
+    in integer thousandths of a degree so that both sides agree exactly.
+    """
+    if angle_max_cdeg <= angle_min_cdeg:
+        raise ValueError("angle_max must be greater than angle_min")
+    if skip_spots < 0:
+        raise ValueError("skip_spots must be >= 0")
+    step_mdeg = round(resolution_deg * 1000) * (skip_spots + 1)
+    if step_mdeg <= 0:
+        raise ValueError("resolution must be > 0")
+    span_mdeg = (angle_max_cdeg - angle_min_cdeg) * 10
+    return 1 + span_mdeg // step_mdeg
 
 
 # ---------------------------------------------------------------------------
@@ -231,10 +280,12 @@ assert HEADER_SIZE == 31
 
 _HEADER_STRUCT = struct.Struct(HEADER_FORMAT)
 
+Buffer = Union[bytes, bytearray, memoryview]
+
 
 @dataclass(frozen=True)
 class MdiHeader:
-    """Header of one MDI measurement packet (a single "UDP data telegram")."""
+    """Header of one MDI measurement packet."""
 
     packet_type: int     #: 0 = distances only, 1 = distances + intensities
     packet_size: int     #: total packet size in bytes, including this header
@@ -251,23 +302,30 @@ class MdiHeader:
     timestamp: int       #: packet timestamp [ms] (wraps at 2**16)
 
     @classmethod
-    def from_bytes(cls, data: bytes, offset: int = 0) -> "MdiHeader":
+    def from_bytes(cls, data: Buffer, offset: int = 0) -> "MdiHeader":
+        """Decode a header; raises :class:`ProtocolError` on short data or bad sync."""
+        if len(data) - offset < HEADER_SIZE:
+            raise ProtocolError("MDI header needs %d bytes, got %d"
+                                % (HEADER_SIZE, max(0, len(data) - offset)))
         (sync, packet_type, packet_size, res_a, res_b, res_c, packet_number,
          total_number, sub_number, scan_freq, scan_spots, first_angle,
          delta_angle, timestamp) = _HEADER_STRUCT.unpack_from(data, offset)
         if sync != SYNC:
-            raise ValueError("bad sync pattern: %r" % sync)
+            raise ProtocolError("bad sync pattern: %r" % (sync,))
         return cls(packet_type, packet_size, res_a, res_b, res_c,
                    packet_number, total_number, sub_number, scan_freq,
                    scan_spots, first_angle, delta_angle, timestamp)
 
     def to_bytes(self) -> bytes:
-        return _HEADER_STRUCT.pack(
-            SYNC, self.packet_type, self.packet_size, self.reserve_a,
-            self.reserve_b, self.reserve_c, self.packet_number,
-            self.total_number, self.sub_number, self.scan_freq,
-            self.scan_spots, self.first_angle, self.delta_angle,
-            self.timestamp)
+        try:
+            return _HEADER_STRUCT.pack(
+                SYNC, self.packet_type, self.packet_size, self.reserve_a,
+                self.reserve_b, self.reserve_c, self.packet_number,
+                self.total_number, self.sub_number, self.scan_freq,
+                self.scan_spots, self.first_angle, self.delta_angle,
+                self.timestamp)
+        except struct.error as exc:
+            raise ValueError("header field out of range: %s" % exc) from None
 
     def expected_size(self) -> int:
         """Packet size implied by ``scan_spots`` and ``packet_type``."""
@@ -289,13 +347,19 @@ class MdiPacket:
         return [first + i * delta for i in range(self.header.scan_spots)]
 
 
-def parse_packet(data: bytes, offset: int = 0) -> MdiPacket:
+def parse_packet(data: Buffer, offset: int = 0) -> MdiPacket:
     """Parse one complete MDI packet starting at ``offset``.
 
-    The caller must guarantee that ``data`` holds at least
-    ``header.packet_size`` bytes from ``offset``.
+    Raises :class:`ProtocolError` if the header is invalid, its size field
+    disagrees with ``scan_spots``/``packet_type``, or ``data`` is too short.
     """
     header = MdiHeader.from_bytes(data, offset)
+    if header.packet_size != header.expected_size():
+        raise ProtocolError("packet_size %d does not match %d spots of type %d"
+                            % (header.packet_size, header.scan_spots, header.packet_type))
+    if len(data) - offset < header.packet_size:
+        raise ProtocolError("MDI packet needs %d bytes, got %d"
+                            % (header.packet_size, len(data) - offset))
     n = header.scan_spots
     distances = struct.unpack_from(">%dH" % n, data, offset + HEADER_SIZE)
     intensities: Optional[Tuple[int, ...]] = None
@@ -316,15 +380,27 @@ def build_packet(*,
                  timestamp_ms: int,
                  distances_mm: Sequence[int],
                  intensities: Optional[Sequence[int]] = None) -> bytes:
-    """Serialise one MDI packet (used by the simulator and the tests)."""
+    """Serialise one MDI packet (used by the simulator and the tests).
+
+    Raises ``ValueError`` for values the header cannot represent.
+    """
     n = len(distances_mm)
-    if packet_type == MdiPacketType.DISTANCE_AND_INTENSITY:
-        if intensities is None or len(intensities) != n:
-            raise ValueError("intensities must match distances for packet type 1")
-        payload = struct.pack(">%dH" % n, *distances_mm) + \
-            struct.pack(">%dH" % n, *intensities)
-    else:
-        payload = struct.pack(">%dH" % n, *distances_mm)
+    if not 1 <= total_number <= 255:
+        raise ValueError("total_number must be in 1..255")
+    if not 1 <= sub_number <= total_number:
+        raise ValueError("sub_number must be in 1..total_number")
+    if HEADER_SIZE + 4 * n > 0xFFFF:
+        raise ValueError("too many spots for one packet: %d" % n)
+    try:
+        if packet_type == MdiPacketType.DISTANCE_AND_INTENSITY:
+            if intensities is None or len(intensities) != n:
+                raise ValueError("intensities must match distances for packet type 1")
+            payload = struct.pack(">%dH" % n, *distances_mm) + \
+                struct.pack(">%dH" % n, *intensities)
+        else:
+            payload = struct.pack(">%dH" % n, *distances_mm)
+    except struct.error as exc:
+        raise ValueError("distances/intensities must be integers in 0..65535: %s" % exc) from None
     header = MdiHeader(
         packet_type=packet_type,
         packet_size=HEADER_SIZE + len(payload),

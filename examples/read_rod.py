@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Read measurement data (UDP data telegrams) from an RSL 235 and print it.
+"""Read scans from a Leuze ROD 308/508 scanner (ROD-300-500 protocol) and print them.
 
 Against a real scanner:
 
-    python3 examples/read_udt.py 192.168.60.101 --port 3050 --count 10
+    python3 examples/read_rod.py 192.168.60.101 --port 3050 --count 10
 
-Without hardware (spins up the built-in simulator):
+Without hardware (spins up the built-in ROD simulator):
 
-    python3 examples/read_udt.py --simulate
+    python3 examples/read_rod.py --simulate
 """
 
 import argparse
@@ -30,7 +30,7 @@ def main() -> int:
     parser.add_argument("host", nargs="?", default="192.168.60.101",
                         help="scanner IP address (default: %(default)s)")
     parser.add_argument("--port", type=int, default=leuze_rsl.DEFAULT_PORT,
-                        help="scanner port (default: %(default)s)")
+                        help="scanner TCP command port (default: %(default)s)")
     parser.add_argument("--udp-port", type=int, default=None,
                         help="local UDP port for the data (default: same as --port)")
     parser.add_argument("--count", type=int, default=10,
@@ -40,7 +40,7 @@ def main() -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING,
                         format="%(asctime)s %(name)s %(levelname)s: %(message)s")
 
     simulator = None
@@ -61,7 +61,7 @@ def main() -> int:
             scanner.start_measurement()
             for i in range(args.count):
                 scan = scanner.get_scan(timeout=5.0)
-                valid = [d for d in scan.distances_mm if d > 0]
+                valid = [d for d, ok in zip(scan.distances_mm, scan.valid_mask()) if ok]
                 line = ("scan %3d: %4d spots  t=%5d ms  "
                         % (i, scan.num_spots, scan.timestamp_ms))
                 if valid:
@@ -69,12 +69,14 @@ def main() -> int:
                              % (min(valid) / 1000.0, max(valid) / 1000.0))
                 else:
                     line += "no valid echoes"
-                if scan.intensities is not None:
-                    line += "  intensity[mid]=%d" % scan.intensities[scan.num_spots // 2]
+                if scan.intensities:
+                    line += "  intensity[mid]=%d" % scan.intensities[len(scan.intensities) // 2]
                 print(line)
             scanner.stop_measurement()
             print("stats:", scanner.stats)
-    except (TimeoutError, leuze_rsl.RSL235Error) as exc:
+    except KeyboardInterrupt:
+        return 130
+    except (leuze_rsl.RSL235Error, OSError) as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 1
     finally:

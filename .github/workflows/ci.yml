@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: python -m pip install --upgrade pip && python -m pip install .
+      - name: Run tests
+        run: python -X dev -W error::ResourceWarning -m unittest discover -s tests -v
+
+  lint:
+    name: lint and typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tools
+        run: python -m pip install --upgrade pip && python -m pip install . pyflakes mypy build twine
+      - name: pyflakes
+        run: python -m pyflakes src tests examples
+      - name: mypy --strict
+        run: python -m mypy --strict src/leuze_rsl
+      - name: Build and check distributions
+        run: python -m build && python -m twine check dist/*

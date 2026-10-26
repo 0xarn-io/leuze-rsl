@@ -1,4 +1,4 @@
-"""Assembling MDI measurement packets into complete scans.
+"""Assembling ROD-300-500 MDI measurement packets into complete scans.
 
 The scanner splits one full scan (one head rotation) into ``total_number``
 MDI packets, numbered ``sub_number`` 1..total_number.  :class:`ScanAssembler`
@@ -8,19 +8,23 @@ into :class:`Scan` objects.
 
 Unlike the reference C++ driver, the assembler is strict about packet
 sequencing: a scan only starts at ``sub_number == 1`` and every following
-packet must continue the sequence with consistent metadata, otherwise the
-partial scan is dropped (and counted).  This avoids emitting silently
-truncated scans when UDP datagrams are lost.
+packet must continue the sequence (``sub_number`` + 1, consecutive
+``packet_number``) with consistent metadata, otherwise the partial scan is
+dropped (and counted).  This avoids emitting silently truncated or stitched
+scans when UDP datagrams are lost.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from functools import cached_property
 from typing import List, Optional, Tuple
 
+from .errors import ProtocolError
 from .protocol import (
     HEADER_SIZE,
+    INTENSITY_MIN_VALID,
     SYNC,
     MdiHeader,
     MdiPacket,
@@ -41,18 +45,13 @@ def header_plausible(header: MdiHeader) -> bool:
         return False
     if header.total_number < 1 or not (1 <= header.sub_number <= header.total_number):
         return False
-    if header.packet_type == MdiPacketType.DISTANCE_AND_INTENSITY:
-        return header.packet_size == HEADER_SIZE + 4 * header.scan_spots
-    # Like the reference driver, treat any other packet type as
+    # Like the reference driver, treat any packet type other than 1 as
     # distances-only -- but only if the size is consistent with that.
-    return header.packet_size == HEADER_SIZE + 2 * header.scan_spots
+    return header.packet_size == header.expected_size()
 
-#: Hard cap for the internal reassembly buffer.  Reaching it means the input
-#: is garbage (no valid sync/packet structure); old bytes are discarded.
-_MAX_BUFFER = 1 << 20
 
-#: How many trailing bytes to keep when discarding an unparseable buffer.
-#: 4 bytes cover a partially received sync pattern.
+#: How many trailing bytes to keep when discarding an unparseable buffer:
+#: 3 bytes cover a partially received 4-byte sync pattern.
 _TAIL_KEEP = len(SYNC) - 1
 
 
@@ -60,12 +59,13 @@ _TAIL_KEEP = len(SYNC) - 1
 class AssemblerStats:
     """Counters describing the health of the incoming data stream."""
 
-    packets_parsed: int = 0           #: well-formed MDI packets consumed
-    scans_completed: int = 0          #: complete scans emitted
+    packets_parsed: int = 0            #: well-formed MDI packets consumed
+    scans_completed: int = 0           #: complete scans emitted
     scans_dropped_incomplete: int = 0  #: partial scans dropped (lost packets)
-    packets_orphaned: int = 0         #: packets that did not fit any scan
-    resyncs: int = 0                  #: header validation failures (corrupt data)
-    bytes_discarded: int = 0          #: garbage bytes skipped
+    packets_orphaned: int = 0          #: packets that did not fit any scan
+    packets_out_of_sequence: int = 0   #: packet_number gaps detected (lost packets)
+    resyncs: int = 0                   #: header validation failures (corrupt data)
+    bytes_discarded: int = 0           #: garbage bytes skipped
 
 
 @dataclass(frozen=True)
@@ -85,11 +85,15 @@ class Scan:
 
     @classmethod
     def from_packets(cls, packets: Tuple[MdiPacket, ...]) -> "Scan":
+        if not packets:
+            raise ValueError("a scan needs at least one packet")
+        has_intensities = packets[0].header.packet_type == MdiPacketType.DISTANCE_AND_INTENSITY
         distances: List[int] = []
         intensities: List[int] = []
         angles: List[int] = []
-        has_intensities = packets[0].header.packet_type == MdiPacketType.DISTANCE_AND_INTENSITY
         for packet in packets:
+            if (packet.header.packet_type == MdiPacketType.DISTANCE_AND_INTENSITY) != has_intensities:
+                raise ValueError("packets of one scan must share the packet type")
             distances.extend(packet.distances_mm)
             if has_intensities and packet.intensities is not None:
                 intensities.extend(packet.intensities)
@@ -125,44 +129,60 @@ class Scan:
         """Scanner timestamp of the last packet [ms] (wraps at 2**16)."""
         return self.headers[-1].timestamp
 
-    # -- converted views ----------------------------------------------------
+    # -- converted views (computed once, cached) -----------------------------
 
-    @property
-    def distances_m(self) -> List[float]:
+    @cached_property
+    def distances_m(self) -> Tuple[float, ...]:
         """Distances in meters (0.0 = no valid echo)."""
-        return [d / 1000.0 for d in self.distances_mm]
+        return tuple(d / 1000.0 for d in self.distances_mm)
 
-    @property
-    def angles_deg(self) -> List[float]:
-        return [a / 1000.0 for a in self.angles_mdeg]
+    @cached_property
+    def angles_deg(self) -> Tuple[float, ...]:
+        return tuple(a / 1000.0 for a in self.angles_mdeg)
 
-    @property
-    def angles_rad(self) -> List[float]:
-        return [math.radians(a / 1000.0) for a in self.angles_mdeg]
+    @cached_property
+    def angles_rad(self) -> Tuple[float, ...]:
+        return tuple(math.radians(a / 1000.0) for a in self.angles_mdeg)
 
-    def to_cartesian(self, skip_invalid: bool = True) -> List[Tuple[float, float]]:
+    def valid_mask(self, min_intensity: int = INTENSITY_MIN_VALID) -> List[bool]:
+        """Per spot: True if it is a real measurement.
+
+        A distance of 0 means no echo; when intensities are present, values
+        below ``min_intensity`` (reference driver: 32) mark an undefined
+        measurement.
+        """
+        if self.intensities is None:
+            return [d > 0 for d in self.distances_mm]
+        return [d > 0 and i >= min_intensity
+                for d, i in zip(self.distances_mm, self.intensities)]
+
+    def to_cartesian(self, skip_invalid: bool = True,
+                     min_intensity: int = INTENSITY_MIN_VALID) -> List[Tuple[float, float]]:
         """Spots as (x, y) in meters in the scanner coordinate frame.
 
-        ``x`` points along 0 deg, ``y`` along +90 deg.  Spots without a valid
-        echo (distance 0) are omitted unless ``skip_invalid`` is False.
+        ``x`` points along 0 deg, ``y`` along +90 deg.  Spots that are not
+        valid (see :meth:`valid_mask`) are omitted unless ``skip_invalid``
+        is False.
         """
         points: List[Tuple[float, float]] = []
-        for dist, angle in zip(self.distances_mm, self.angles_mdeg):
-            if dist == 0 and skip_invalid:
+        for dist, angle, ok in zip(self.distances_mm, self.angles_rad,
+                                   self.valid_mask(min_intensity)):
+            if skip_invalid and not ok:
                 continue
-            a = math.radians(angle / 1000.0)
             d = dist / 1000.0
-            points.append((d * math.cos(a), d * math.sin(a)))
+            points.append((d * math.cos(angle), d * math.sin(angle)))
         return points
 
 
 class ScanAssembler:
     """Incrementally parse a raw MDI byte stream into complete scans.
 
-    The assembler is transport agnostic: feed it UDP datagram payloads or
-    arbitrary TCP stream chunks via :meth:`feed`, which returns any scans
-    completed by the new data.  It is not thread safe; callers must feed it
-    from a single thread (or guard it with a lock).
+    The assembler is transport agnostic: feed it TCP stream chunks via
+    :meth:`feed` (bytes may be split arbitrarily) or whole UDP datagrams via
+    :meth:`feed_datagram` (a datagram must hold whole packets; nothing is
+    carried over between datagrams).  Both return any scans completed by the
+    new data.  It is not thread safe; callers must feed it from a single
+    thread (or guard it with a lock).
     """
 
     def __init__(self) -> None:
@@ -172,13 +192,14 @@ class ScanAssembler:
 
     def reset(self) -> None:
         """Discard buffered bytes and any partially assembled scan."""
+        self.stats.bytes_discarded += len(self._buf)
         self._buf.clear()
         if self._pending:
             self.stats.scans_dropped_incomplete += 1
         self._pending = []
 
     def feed(self, data: bytes) -> List[Scan]:
-        """Consume raw bytes; return scans completed by this data."""
+        """Consume raw stream bytes; return scans completed by this data."""
         self._buf += data
         scans: List[Scan] = []
         while True:
@@ -188,6 +209,20 @@ class ScanAssembler:
             scan = self._integrate(packet)
             if scan is not None:
                 scans.append(scan)
+        return scans
+
+    def feed_datagram(self, data: bytes) -> List[Scan]:
+        """Consume one UDP datagram holding whole MDI packets.
+
+        Trailing bytes that do not form a complete packet are discarded
+        (counted in ``stats.bytes_discarded``) instead of being joined with
+        the next datagram, so one corrupt datagram cannot swallow the
+        following ones.
+        """
+        scans = self.feed(data)
+        if self._buf:
+            self.stats.bytes_discarded += len(self._buf)
+            self._buf.clear()
         return scans
 
     # -- internals -----------------------------------------------------------
@@ -207,8 +242,6 @@ class ScanAssembler:
                 self.stats.bytes_discarded += idx
                 del buf[:idx]
             if len(buf) < HEADER_SIZE:
-                if len(buf) > _MAX_BUFFER:  # cannot happen with idx==0, kept for safety
-                    del buf[:]
                 return None
             header = MdiHeader.from_bytes(buf)
             if not header_plausible(header):
@@ -219,11 +252,16 @@ class ScanAssembler:
                 del buf[:len(SYNC)]
                 continue
             if len(buf) < header.packet_size:
-                if len(buf) > _MAX_BUFFER:
-                    self.stats.bytes_discarded += len(buf)
-                    del buf[:]
+                # Wait for the rest; packet_size is a u16, so the buffer
+                # never grows beyond 64 KiB plus one chunk.
                 return None
-            packet = parse_packet(bytes(buf[:header.packet_size]))
+            try:
+                packet = parse_packet(bytes(buf[:header.packet_size]))
+            except ProtocolError:          # cannot happen after header_plausible
+                self.stats.resyncs += 1
+                self.stats.bytes_discarded += len(SYNC)
+                del buf[:len(SYNC)]
+                continue
             del buf[:header.packet_size]
             self.stats.packets_parsed += 1
             return packet
@@ -236,15 +274,26 @@ class ScanAssembler:
                 self.stats.scans_dropped_incomplete += 1
             self._pending = [packet]
         else:
-            expected = self._pending and (
-                header.sub_number == self._pending[-1].header.sub_number + 1
-                and header.total_number == self._pending[0].header.total_number
-                and header.packet_type == self._pending[0].header.packet_type
+            if not self._pending:
+                self.stats.packets_orphaned += 1
+                return None
+            first = self._pending[0].header
+            last = self._pending[-1].header
+            # The packet counter advances by one per packet; a larger gap
+            # means datagrams were lost (possibly a whole rotation, which
+            # would otherwise be stitched into this scan unnoticed).
+            step = (header.packet_number - last.packet_number) & 0xFFFF
+            if step > 1:
+                self.stats.packets_out_of_sequence += 1
+            expected = (
+                header.sub_number == last.sub_number + 1
+                and header.total_number == first.total_number
+                and header.packet_type == first.packet_type
+                and step <= 1
             )
             if not expected:
-                if self._pending:
-                    self.stats.scans_dropped_incomplete += 1
-                    self._pending = []
+                self.stats.scans_dropped_incomplete += 1
+                self._pending = []
                 self.stats.packets_orphaned += 1
                 return None
             self._pending.append(packet)
