@@ -100,6 +100,7 @@ instead of silently stealing the datagrams.
 python3 examples/read_udt.py --port 3050 --count 10    # print scans + status
 python3 examples/dump_udt.py --port 3050               # raw datagram decoder/hexdump
 python3 examples/record_udt.py --port 3050 --out x.bin # record raw datagrams (stdlib only)
+python3 examples/record_udt.py --port 9991 9992 9993   # several scanners, one file per port
 python3 examples/live_plot.py --port 3050              # polar live view (matplotlib)
 ```
 

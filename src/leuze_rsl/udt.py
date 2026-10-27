@@ -1069,7 +1069,7 @@ class RSL235Udt:
             self._sock = sock
             self._running = True
             self._thread = threading.Thread(target=self._rx_loop, args=(sock,),
-                                            name="leuze_rsl-udt-rx", daemon=True)
+                                            name="leuze_rsl-udt-rx:%d" % self.port, daemon=True)
             self._thread.start()
             log.info("listening for UDP data telegrams on %s:%d",
                      self.bind_address or "0.0.0.0", self.port)
@@ -1203,14 +1203,14 @@ class RSL235Udt:
                     log.exception("error while processing a datagram")
         finally:
             if failure is not None:
-                log.error("UDP receiver failed: %s", failure)
+                log.error("UDP receiver on port %d failed: %s", self.port, failure)
                 with self._lifecycle:
                     if self._sock is sock:
                         self._running = False
                         self._sock = None
                         sock.close()
                 self._wake_waiters(ScannerConnectionError(
-                    "UDP receiver failed: %s" % failure))
+                    "UDP receiver on port %d failed: %s" % (self.port, failure)))
 
     def _process(self, data: bytes, still_current: Callable[[], bool]) -> None:
         assembler = self._assembler

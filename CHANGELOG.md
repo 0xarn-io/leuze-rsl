@@ -82,7 +82,11 @@ angles and status fields decode differently (correctly) for an RSL 235.
 ### Added
 
 - `examples/record_udt.py`: records raw UDP data telegrams to a file with the
-  standard library only, for offline analysis and bug reports.
+  standard library only, for offline analysis and bug reports; several
+  scanners (one port each) can be recorded at once, one file per port.
+- Receiver threads are named after their port (`leuze_rsl-udt-rx:<port>`)
+  and receiver failures name the port, so a process serving several
+  scanners can tell them apart; a six-scanner test covers that setup.
 - `StatusProfile.supply_voltage_v`: supply voltage in volts. The unit of the
   VOLT field is 0.1 V (an RSL 235 on a 24 V supply sends 234); the
   specification's "0.1 mV" is a documentation error.

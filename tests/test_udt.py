@@ -831,6 +831,24 @@ class EndToEndTests(unittest.TestCase):
         self.addCleanup(sim.stop)
         return sim
 
+    def test_six_scanners_in_one_process(self):
+        """One receiver per scanner (six RSL 235 pushing to six ports): no cross-talk."""
+        receivers = [self.start_receiver() for _ in range(6)]
+        for k, receiver in enumerate(receivers):
+            half = 1000 * (k + 1)                       # each simulated room has its own size
+            self.start_simulator(receiver.port, room_half_width_mm=half, room_half_height_mm=half)
+        for k, receiver in enumerate(receivers):
+            scans = [receiver.get_scan(timeout=5.0) for _ in range(3)]
+            for scan in scans:
+                self.assertEqual(scan.num_beams, 271)
+                nearest = min(d for d, ok in zip(scan.distances_mm, scan.valid_mask()) if ok)
+                self.assertAlmostEqual(nearest, 1000 * (k + 1), delta=20)   # its own room
+            self.assertEqual(receiver.stats["foreign_datagrams_dropped"], 0)
+            self.assertEqual(receiver.stats["scans_dropped_incomplete"], 0)
+        thread_names = {t.name for t in threading.enumerate()}
+        for receiver in receivers:
+            self.assertIn("leuze_rsl-udt-rx:%d" % receiver.port, thread_names)
+
     def test_receive_from_simulator(self):
         receiver = self.start_receiver(source_ip="127.0.0.1")
         self.start_simulator(receiver.port)
