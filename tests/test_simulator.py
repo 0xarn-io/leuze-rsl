@@ -314,9 +314,15 @@ class UdtMeasurementTests(unittest.TestCase):
         self.assertEqual(scan.status.supply_voltage_v, 23.4)
 
     def test_beams_beyond_max_range_have_no_echo(self):
-        # open room (walls far away) but a 25 m range: nothing comes back
-        sim = UdtSimulator(room_half_width_mm=10 ** 6, room_half_height_mm=10 ** 6)
-        self.assertEqual(set(sim.beam_values()), {65535})
+        # open room (walls far away) but a 25 m range: the echo is too weak to
+        # measure -> 32767 with a weak signal strength, as captured from an RSL 235
+        sim = UdtSimulator(room_half_width_mm=10 ** 6, room_half_height_mm=10 ** 6,
+                           beams_per_datagram=100)
+        self.assertEqual(set(sim.beam_values()), {32767})
+        asm, scans = self._assemble(sim)
+        self.assertEqual(set(scans[0].distances_mm), {32767})
+        self.assertEqual(set(scans[0].signal_strengths), {150})
+        self.assertEqual(sum(scans[0].valid_mask()), 0)
         # RSL 400: the no-echo value is the top of its 16-bit distance range
         sim400 = UdtSimulator(family=ScannerFamily.RSL400, room_half_width_mm=10 ** 6,
                               room_half_height_mm=10 ** 6, no_echo_indices={5})

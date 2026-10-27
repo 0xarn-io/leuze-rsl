@@ -26,13 +26,15 @@ angles and status fields decode differently (correctly) for an RSL 235.
 - **Beam angles were compressed 2×** for the RSL 200 series: one index is
   0.2°, not 0.1° (the specification limits RSL 200 indices to 0…1350;
   Sensor Studio labels the index fields "× 0.2°").
-- **No-echo value.** RSL 235 hardware sends 65535 (0xFFFF, with a signal
-  strength of 0xFFFF) for beams without a valid echo, not the 32767 that
-  earlier releases documented. `NO_ECHO_DISTANCE_MM` is now 65535;
-  `valid_mask()` rejects 0, 65535 and anything above the family's spec
-  range (`BeamGeometry.max_valid_mm`: 32766 for RSL 200, 65534 for RSL 400),
-  so both values are invalid either way. The simulator emits the hardware
-  values.
+- **Invalid-measurement markers.** RSL 235 hardware sends 65535 (0xFFFF,
+  with a signal strength of 0xFFFF) for beams without any echo and 32767
+  (with the weak signal strength actually received) for echoes too weak to
+  measure; earlier releases knew only 32767 and called it "no echo".
+  `NO_ECHO_DISTANCE_MM` is now 65535; `valid_mask()` rejects 0, 65535 and
+  anything above the family's spec range (`BeamGeometry.max_valid_mm`:
+  32766 for RSL 200, 65534 for RSL 400), so both markers are invalid. The
+  simulator emits both as the hardware does (65535/65535 for forced no-echo
+  beams, 32767 with a weak signal beyond `max_range_mm`).
 - Strict mode could emit truncated scans (lost first/last block, or no
   contour known yet) and could deliver a scan twice (late/duplicated
   datagram). Scans are now complete only when blocks 0…n are all present and
@@ -91,10 +93,12 @@ angles and status fields decode differently (correctly) for an RSL 235.
   VOLT field is 0.1 V (an RSL 235 on a 24 V supply sends 234); the
   specification's "0.1 mV" is a documentation error.
 - `UdtStats.cycles_missed`: scan numbers never seen between consecutive
-  cycles. An RSL 235 at telegram interval 1 skips every 11th cycle.
+  cycles. RSL 235 units at telegram interval 1 skip cycles at a
+  unit-specific rate (from 1 in 400 to every 11th).
 - `python -m leuze_rsl` prints the supply voltage and temperature.
-- One complete cycle captured from an RSL 235 (status + 271-beam
-  distance/signal datagram) is decoded byte for byte in the test suite.
+- Two complete cycles captured from RSL 235 units (status + 271-beam
+  distance/signal datagram; one unconfigured on the bench, one in safety
+  mode in the field) are decoded byte for byte in the test suite.
 
 ### Changed
 

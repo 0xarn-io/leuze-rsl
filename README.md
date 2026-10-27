@@ -61,7 +61,7 @@ from leuze_rsl import RSL235Udt
 with RSL235Udt(port=3050) as receiver:          # the port configured above
     scan = receiver.get_scan(timeout=5.0)       # one complete scan cycle
     print(scan.scan_number, scan.family,        # e.g. ScannerFamily.RSL200
-          scan.distances_mm[:5],                # [mm], 65535 = no echo
+          scan.distances_mm[:5],                # [mm]; 65535 / 32767 = no valid echo
           scan.angles_deg()[:5])                # beam angles
     if scan.signal_strengths:                   # None for data type ID 6
         print(scan.signal_strengths[:5])
@@ -74,7 +74,7 @@ Every `UdtScan` exposes:
 
 | attribute | meaning |
 |---|---|
-| `distances_mm` / `distances_m` | distance per beam; 0, 65535 (no echo) or anything above the family's range (RSL 200: 32767, RSL 400: 65535) = no valid echo |
+| `distances_mm` / `distances_m` | distance per beam; 0, 65535 (no echo) and 32767 (echo too weak, RSL 200) = no valid measurement |
 | `signal_strengths` | signal strength per beam [digits], or `None` |
 | `valid_mask()` | per beam: real measurement or not |
 | `beam_indices()` / `angles_deg()` | beam geometry from the measurement contour (see [angle convention](#angle-convention)) |
@@ -212,11 +212,13 @@ bytes, firmware ≥ 5.6):*
 strength**: n × (`u16` distance [mm] + `u16` signal strength [digits]).
 Large scans are split across datagrams with consecutive `block` numbers;
 all datagrams of one cycle share the `scan_number`. The spec gives the
-distance range as 0…32767 mm (RSL 200) and 0…65535 mm (RSL 400). Real
-RSL 235 hardware reports **65535** (0xFFFF, with a signal strength of
-0xFFFF) for beams without a valid echo (capture of 2026-10-27; the 32767
-claimed by earlier releases was never observed). `scan.valid_mask()` treats
-0, the no-echo value and anything above the family's range as invalid.
+distance range as 0…32767 mm (RSL 200) and 0…65535 mm (RSL 400). RSL 235
+hardware uses two markers for beams without a valid measurement (captures
+from six units, 2026-10-27): **65535** with a signal strength of 65535 when
+there is no echo at all, and **32767** together with the weak signal
+strength that was received (about 140–190 digits) when the echo is too
+weak to measure, typically on beams looking far. `scan.valid_mask()` treats
+0, 65535 and anything above the family's range (so 32767 too) as invalid.
 
 A capture from real RSL 235 hardware (56-byte status + single 1104-byte
 distance+signal datagram = 271 beams per cycle, i.e. the full-range contour
@@ -228,10 +230,17 @@ distance+signal datagram = 271 beams per cycle, i.e. the full-range contour
 50 04 00 00 08 00 06 00 04 0b 01 32 03 00 00 00 ...   ID 3, 1104 B
 ```
 
-Observed on that device with *telegram interval* 1 (every 25 ms scan):
-the scan counter advances at 40 Hz, but every 11th cycle is not transmitted
-at all (a 48 ms gap, both telegrams missing). The receiver reports such
-gaps in `stats.cycles_missed`; they are not reassembly failures.
+Observed on six RSL 235 units with *telegram interval* 1 (every 25 ms
+scan): the scan counter advances at 40 Hz, but some cycles are never
+transmitted (a 48 ms gap, both telegrams missing). The rate is a property
+of the unit, from 1 in 400 cycles to every 11th cycle, and the gaps of
+different units do not coincide, so they are not receiver drops. The
+receiver reports them in `stats.cycles_missed`; they are not reassembly
+failures. Each configured unit reports its own non-zero `signature`
+(SAFE_SIG), an unconfigured device (`operating_mode` 0) sends 0, and
+`error_class` / `error_number` carried values (73 / 1259) with the ERROR
+bit clear on every unit, so they describe the latest event rather than an
+active error.
 
 ---
 

@@ -730,8 +730,9 @@ class UdtSimulator:
       20 -> 48-byte status datagram (60 with ``signature``); default contour
       ``(0, 2699, 1)`` = 2700 beams; -0.1 deg per index from +134.95 deg.
 
-    Beams without echo carry distance 65535 and signal strength 65535, as
-    captured from an RSL 235.
+    Forced no-echo beams carry distance 65535 and signal strength 65535;
+    beams beyond ``max_range_mm`` carry 32767 (RSL 200) with a weak signal
+    strength, both as captured from RSL 235 units.
 
     Beam geometry and the no-echo values come from
     :data:`leuze_rsl.udt.GEOMETRY`, so the simulated room is consistent with
@@ -1001,8 +1002,10 @@ class UdtSimulator:
         for position, index in enumerate(MeasurementContour(*self.contour).beam_indices()):
             d = _room_distance_mm(geometry.angle_deg(index),
                                   self.room_half_width_mm, self.room_half_height_mm)
-            if position in self.no_echo_indices or d > self.max_range_mm:
-                values.append(geometry.no_echo_mm)
+            if position in self.no_echo_indices:
+                values.append(geometry.no_echo_mm)          # no echo at all
+            elif d > self.max_range_mm:
+                values.append(geometry.max_valid_mm + 1)    # echo too weak to measure
             else:
                 values.append(int(d))
         return values
@@ -1010,7 +1013,7 @@ class UdtSimulator:
     def measurement_payloads(self) -> List[bytes]:
         """Measurement data per block (without frames); constant between scans."""
         distances = self.beam_values()
-        no_echo = GEOMETRY[self.family].no_echo_mm
+        geometry = GEOMETRY[self.family]
         payloads: List[bytes] = []
         for off in range(0, len(distances), self.beams_per_datagram):
             chunk = distances[off:off + self.beams_per_datagram]
@@ -1018,8 +1021,12 @@ class UdtSimulator:
                 values: List[int] = []
                 for d in chunk:
                     values.append(d)
-                    # hardware sends signal strength 0xFFFF together with a no-echo distance
-                    values.append(65535 if d == no_echo else max(100, min(50000, d // 2)))
+                    if d == geometry.no_echo_mm:
+                        values.append(65535)      # hardware: no echo -> signal 0xFFFF
+                    elif d > geometry.max_valid_mm:
+                        values.append(150)        # hardware: too weak -> the weak signal (~140-190)
+                    else:
+                        values.append(max(100, min(50000, d // 2)))
                 payloads.append(struct.pack("<%dH" % len(values), *values))
             else:
                 payloads.append(struct.pack("<%dH" % len(chunk), *chunk))

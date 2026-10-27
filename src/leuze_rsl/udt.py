@@ -122,11 +122,12 @@ _PROFILE_LENGTH = {STATUS_PROFILE_TYPE_RSL200: 28, STATUS_PROFILE_TYPE_RSL400: 2
 CONTOUR_SIZE = 8
 _CONTOUR_STRUCT = struct.Struct("<HHHH")
 
-#: Distance value RSL 235 hardware sends for beams without a valid echo:
-#: 65535 (0xFFFF, with a signal strength of 0xFFFF), observed in a capture
-#: of 2026-10-27.  Earlier releases documented 32767, the top of the spec's
-#: RSL 200 distance range; that value never occurred on hardware but is
-#: still treated as invalid by :meth:`UdtScan.valid_mask`.
+#: Distance value RSL 235 hardware sends for beams without any echo: 65535
+#: (0xFFFF, with a signal strength of 0xFFFF).  A second marker, 32767 (the
+#: top of the spec's RSL 200 range) with the weak signal strength actually
+#: received, marks echoes too weak to measure.  Both were observed on six
+#: units (captures of 2026-10-27) and both are rejected by
+#: :meth:`UdtScan.valid_mask`.
 NO_ECHO_DISTANCE_MM = 65535
 
 
@@ -172,7 +173,8 @@ class BeamGeometry:
 #: no-echo value (65535) was observed on an RSL 235; the RSL 400 is assumed
 #: to send the same (the top of its 0..65535 mm range).  ``max_valid_mm`` is
 #: one below the spec's distance range top (RSL 200: 0..32767 mm, RSL 400:
-#: 0..65535 mm), so both the no-echo value and the range top are invalid.
+#: 0..65535 mm), so both the no-echo value and the range top (RSL 200:
+#: 32767, sent for echoes too weak to measure) are invalid.
 GEOMETRY: Dict[ScannerFamily, BeamGeometry] = {
     ScannerFamily.RSL200: BeamGeometry(index_step_deg=-0.2, angle_at_index0_deg=135.0,
                                        max_index=1350, no_echo_mm=65535, max_valid_mm=32766),
@@ -500,10 +502,11 @@ class UdtScan:
     def valid_mask(self, max_valid_mm: Optional[int] = None) -> List[bool]:
         """Per beam: True if the distance is a real measurement.
 
-        0 mm, the no-echo value (65535 on RSL 235 hardware, sent with a
-        signal strength of 65535) and anything above the family's distance
-        range (RSL 200: 32767 mm, RSL 400: 65535 mm) count as invalid, as
-        does anything above ``max_valid_mm`` when given.
+        0 mm, the no-echo value (65535, sent with a signal strength of
+        65535) and anything above the family's distance range (RSL 200:
+        32767 mm, which RSL 235 hardware sends for echoes too weak to
+        measure; RSL 400: 65535 mm) count as invalid, as does anything
+        above ``max_valid_mm`` when given.
         """
         limit = self.geometry.max_valid_mm if max_valid_mm is None else max_valid_mm
         return [0 < d <= limit for d in self.distances_mm]

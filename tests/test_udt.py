@@ -145,6 +145,49 @@ RSL235_CAPTURE_MEASUREMENT = bytes.fromhex(
     "2510a201e2009d01ef004002d9009901b70453019708f601"
 )
 
+#: One cycle (scan 332669) from a second RSL 235 unit mounted overhead in a
+#: hall, in safety mode with a configuration signature; its measurement
+#: datagram carries the 32767 marker (echo too weak) on far-looking beams.
+RSL235_CAPTURE_FAR_STATUS = bytes.fromhex(
+    "3800000008000600040b0132010000007d130500150100f401870000ea00620100000000"
+    "7d130500aa2faec249eb04000000460505000000"
+)
+
+#: Measurement datagram of that cycle (271 beams, 7 with 32767).
+RSL235_CAPTURE_FAR_MEASUREMENT = bytes.fromhex(
+    "5004000008000600040b0132030000007d130500d41c1402571d1602e51d1e02731e1802"
+    "0b1f1402b11f10027520290227212302d7210e029a22fd017a23f7016724fb0165250302"
+    "6526fb01bf273002af28f601fd29eb014d2bd301c72cd301572ecc010c30b801d831b801"
+    "e433a0018e36620279387e01173b3201ff3d1301205c91003c612b02124f8e00f70f8c02"
+    "e90f8602e30f5802a11179028e1179027e1178026b117a025e118f02ff7f8e00ff7f8f00"
+    "ff7f9000ff7f8e00ff7f8f00ff7f8f00133e0502193e1e02283e0602243e20027f3e7b02"
+    "3a3ef701563eb3017d3ee701bf3e2602dc3eb901053fa501403fe001e93ec701ff7f9200"
+    "140c03021f0c0602280c03023f0c0402480cfd015d0c05027a0c1002810c0902920c0202"
+    "b10c0b02d9069001ef060c02f7062a0207076e020f0728021d07150232079c014a070202"
+    "6207f70164071d0275070b0292070202ad070e02b5071502d0071402ea071d0203080202"
+    "2a081e023f08d9015e08140294080602ae08ce01cf080202ff080c022e0905024509fe01"
+    "8209f001c0090c02f3090e022a0ae801750a0802a60af201050b1602700a8d02690a1b02"
+    "810a29028b0c3303d10cbd02240d3a02160d8a02ef0ca002ec0ab302120b3602010b3502"
+    "390b5903250b5803030b5803eb0a4503e40a3d03c80a3303b80a3503b50a2703910a0903"
+    "850afc026c0ada02520ac402340a9002190a60020b0a61020a0a6b02080a7202f9096b02"
+    "fc098402090ac602110af002190a3203180a6403fb09d602eb099d02090a0e03130a0d03"
+    "0c0aed02fb099802fb098702f6096602000a5602050a54020d0a63021f0a7502300a8202"
+    "430a8a02660aef02840a0303970a0203a50a2503ab0a4a03ca0a4203d30a4903e20a4003"
+    "e90a0b03030b2b03280b39031b0b93021e0b4302200b3d02ef0cad02170d95023e0d3402"
+    "620d2802810d31026e0a0c027c0a2d02a40ab603700c99021b0c8902d00b7602be0b9602"
+    "ea0b8f02170c9102490c95027b0c8e02b80cab02e90c8302230d8802d510170229111d02"
+    "7b111702d41119023212150296121d0201131d026a131602e61315026a141102f6140b02"
+    "8615080229160d02d21607028217fe014b180c0261187a021d187602ee176c02d9174d02"
+    "90175702551766023517a3020d176202f1169e02fc163f02d1162802b81628029a163502"
+    "7b1630026416280249162b0232162a02241632021a1627020b162e02fc1530021c161d02"
+    "081607023a341d02290587022f05b1022d054f035e05b7038b05210308341f0215342602"
+    "213426029e05c3011e2d1502162de10187342502a9342502ca342302f9341f0226352402"
+    "bd301702ff2fae01442f9101042d0602f72b1d02182ed502cb2c5d01e12aaf01af284901"
+    "41328c001b2537018d233c013e223d01c82007021520fa01b01e6301ba1d9101d91c8001"
+    "081c8301361b9101731a8601cc197601251986017b189801ed17a30161179f01e016bb01"
+    "ac160e022c163a027515250211132e01df112a0179107a02"
+)
+
 
 class Rsl235CaptureTests(unittest.TestCase):
     """Byte-exact decoding of one cycle captured from real RSL 235 hardware."""
@@ -204,6 +247,33 @@ class Rsl235CaptureTests(unittest.TestCase):
         self.assertEqual(len(scan.to_cartesian()), 270)
         self.assertEqual(asm.stats.scans_completed, 1)
         self.assertEqual(asm.stats.cycles_missed, 0)
+
+    def test_configured_unit_and_weak_echo_marker(self):
+        """A unit in safety mode: fields free, OSSD on, signature set; 32767 marks weak echoes."""
+        status = StatusProfile.from_bytes(RSL235_CAPTURE_FAR_STATUS[FRAME_SIZE:])
+        self.assertEqual(status.scan_number, 332669)
+        self.assertEqual(status.operating_mode, 1)                   # safety mode
+        self.assertTrue(status.ossd_a)
+        self.assertFalse(status.a_protective_violated)
+        self.assertFalse(status.a_warning_violated)
+        self.assertFalse(status.warning_field_2_violated)
+        self.assertEqual(status.field_triple, 1)
+        self.assertEqual(status.signature, 3266195370)               # non-zero once configured
+        self.assertEqual((status.supply_voltage_v, status.temperature_c), (23.4, 35.4))
+        self.assertEqual((status.error, status.error_class, status.error_number), (False, 73, 1259))
+        asm = UdtAssembler()
+        asm.feed_datagram(RSL235_CAPTURE_FAR_STATUS)
+        scan = asm.feed_datagram(RSL235_CAPTURE_FAR_MEASUREMENT)[0]
+        weak = [i for i, d in enumerate(scan.distances_mm) if d == 32767]
+        self.assertEqual(weak, [38, 39, 40, 41, 42, 43, 57])
+        for i in weak:                                              # a real, weak signal is reported
+            self.assertTrue(140 <= scan.signal_strengths[i] <= 190, scan.signal_strengths[i])
+        self.assertNotIn(65535, scan.distances_mm)
+        mask = scan.valid_mask()
+        self.assertFalse(any(mask[i] for i in weak))
+        self.assertEqual(sum(mask), 264)
+        self.assertEqual(scan.distances_mm[36:38], (4459, 4446))
+        self.assertEqual(len(scan.to_cartesian()), 264)
 
 
 class FrameTests(unittest.TestCase):
