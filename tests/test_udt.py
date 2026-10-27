@@ -102,6 +102,109 @@ RSL400_CAPTURE = bytes([
     0x00, 0x00, 0x8b, 0x0a, 0x01, 0x00, 0x00, 0x00,              # contour
 ])
 
+#: One complete cycle (scan 5453125) captured from an RSL 235 (RSL235-S, 24 V
+#: supply, Sensor Studio: ID 3, contour 0..1350 step 5) on 2026-10-27: the
+#: 56-byte status datagram and the 1104-byte distance+signal datagram.
+RSL235_CAPTURE_STATUS = bytes.fromhex(
+    "3800000008000600040b0132010000004535530015000000007a0000ea003b0100000000"
+    "453553000000000049eb04000000460505000000"
+)
+
+#: Measurement datagram of the same cycle (271 beams).
+RSL235_CAPTURE_MEASUREMENT = bytes.fromhex(
+    "5004000008000600040b01320300000045355300ffffffff2201cb02ed005002c503e202"
+    "b203e602a902750272011e059101fd047e03ed02da0297039501d7047e01c8045303f502"
+    "31022b0479018b043402190438020e048f0143046b02c903c5016204b1015704d6014104"
+    "c5013f04dd01260405020404e501e7034402c3033202c8032502bc033702930367027e03"
+    "6902e9025d02f102d6020d03d3020e03d1020c03cf021703cb021c03ca021e03cb022203"
+    "c8022703c7022703c6022b03c3022e03c5023703c6024d03c8029203c902a303c3024b03"
+    "c10249038102bf0382027e038302660384025d0386024d038b0240038f0240038e023603"
+    "a6022d03d7021f03db021c03de022203e1022003e6021503e9021503ee021003f4020e03"
+    "f7020e03000311030503190309030f0310030a03140305031d030803ea0144049201f802"
+    "8201f5027a01f1027101ee026301eb025a01de025101df024901ed024701ec024d01e802"
+    "5001e7025801ed025b01f0027b01a2028d018f0294017f0299018502a1018d02a8019a02"
+    "b4019702bd019802c1019d02ce019002da018602e6018602f0018202fd019a0206028b02"
+    "17028b022502a0022f029b02460297025e0289027002a0028202850297028202ad028302"
+    "cd027e02e7027b020b034f022c037b025303420280034602b50366022504e20373040204"
+    "b104c303e204ee023d0501037d052c020806310294064002300740027308340494095a03"
+    "8e0b48042c0cab03690c7b035c0c97034d0c2503570bc002530bab02710bbf01630b7d01"
+    "590b6501700b73016d0b6c01700b66017c0b5a01730b6f01790b67017e0b5d01990b4b01"
+    "9a0b4301ae0b2601bc0b3f01be0b2301e70b2a01ea0b26010b0c0a01250c2001340c0f01"
+    "2c378a0050358900b33566023f352e022435c9015533b7018331ad01e32fa101772e9f01"
+    "0c2d7e01cb2b8201932a8301bc29e00161287a0170275801971a2d012e0e1a02fb0d5602"
+    "042464013f236501d121dc01d721620146215f01d02094014920a201ad28a7022f286602"
+    "9f272d02a41a1902e71a1f02062689021f256702e524180257246e027b2422024b0a1702"
+    "630a2c027c0a2e017d20c203101da1027c1c3302cc1c5701dc1c6701eb1c3501221d0001"
+    "96260d02d723260293240a02e325180228261502cc2523024125260297251002361f0802"
+    "f11efb01cf24180208251c02d8241c025f242502b8241b02b32376021d24ee02a7235502"
+    "1d247602432425023d24280261241b02fb23210202243c02ce2325027724290250244002"
+    "702424023e249702250669027005c4029104b402f203a6028c03a2023603ad02fd02b502"
+    "c002b60284026c026402c00235020702ff01760200022f02e1018502c0010a02c001c101"
+    "a5018d028f013d028001db016a010d026d01dc014701750153019002410148013b010002"
+    "3601f401210120011a01d5011e0111027e177e010801f900000100020001f1012e08ec00"
+    "2510a201e2009d01ef004002d9009901b70453019708f601"
+)
+
+
+class Rsl235CaptureTests(unittest.TestCase):
+    """Byte-exact decoding of one cycle captured from real RSL 235 hardware."""
+
+    def test_status_datagram(self):
+        frame = UdtFrame.from_bytes(RSL235_CAPTURE_STATUS)
+        self.assertEqual((frame.total_length, frame.h1_size, frame.follow_flag, frame.request_id),
+                         (56, 8, 0, 6))
+        self.assertEqual(frame.header2, b"\x04\x0b\x01\x32")
+        self.assertEqual((frame.telegram_id, frame.block, frame.scan_number), (1, 0, 5453125))
+        status = StatusProfile.from_bytes(RSL235_CAPTURE_STATUS[FRAME_SIZE:])
+        self.assertEqual(status.family, ScannerFamily.RSL200)
+        self.assertEqual((status.profile_type, status.profile_length, status.contour_offset), (21, 28, 28))
+        self.assertEqual(status.scan_number, frame.scan_number)      # SCAN_NUM == frame scan number
+        self.assertEqual(status.operating_mode, 0)
+        self.assertFalse(status.error)
+        self.assertFalse(status.ossd_a)                              # OSSDs off ...
+        self.assertTrue(status.a_protective_violated)                # ... objects inside the fields
+        self.assertTrue(status.a_warning_violated)
+        self.assertTrue(status.warning_field_2_violated)
+        self.assertFalse(status.parked)
+        self.assertFalse(status.restart_interlock)
+        self.assertEqual((status.field_triple, status.inputs, status.outputs), (0, 0, 0))
+        self.assertEqual(status.supply_voltage_raw, 234)             # 24 V supply -> unit is 0.1 V
+        self.assertEqual(status.supply_voltage_v, 23.4)
+        self.assertEqual(status.temperature_c, 31.5)
+        self.assertEqual(status.signature, 0)
+        self.assertEqual((status.error_class, status.error_number), (73, 1259))
+        contour = MeasurementContour.from_bytes(RSL235_CAPTURE_STATUS[FRAME_SIZE:], status.contour_offset)
+        self.assertEqual(contour, MeasurementContour(0, 1350, 5, 0))
+        self.assertEqual(contour.num_beams, 271)
+
+    def test_measurement_datagram(self):
+        frame = UdtFrame.from_bytes(RSL235_CAPTURE_MEASUREMENT)
+        self.assertEqual((frame.total_length, frame.telegram_id, frame.block, frame.scan_number),
+                         (1104, TELEGRAM_ID_DISTANCE_SIGNAL, 0, 5453125))
+        asm = UdtAssembler(strict=True)
+        self.assertEqual(asm.feed_datagram(RSL235_CAPTURE_STATUS), [])
+        scans = asm.feed_datagram(RSL235_CAPTURE_MEASUREMENT)
+        self.assertEqual(len(scans), 1)
+        scan = scans[0]
+        self.assertTrue(scan.complete)
+        self.assertEqual((scan.num_beams, scan.num_blocks, scan.family), (271, 1, ScannerFamily.RSL200))
+        self.assertEqual(scan.status.scan_number, 5453125)
+        self.assertEqual(scan.beam_indices()[:3], [0, 5, 10])
+        self.assertEqual(len(scan.angles_deg()), 271)
+        # beam 0 has no echo: distance 0xFFFF with signal strength 0xFFFF
+        self.assertEqual((scan.distances_mm[0], scan.signal_strengths[0]), (65535, 65535))
+        self.assertEqual(scan.distances_mm[1:4], (290, 237, 965))
+        self.assertEqual(scan.signal_strengths[1:4], (715, 592, 738))
+        mask = scan.valid_mask()
+        self.assertEqual(mask[:2], [False, True])
+        self.assertEqual(sum(mask), 270)
+        valid = [d for d, ok in zip(scan.distances_mm, mask) if ok]
+        self.assertEqual((min(valid), max(valid)), (217, 14124))
+        self.assertNotIn(32767, scan.distances_mm)
+        self.assertEqual(len(scan.to_cartesian()), 270)
+        self.assertEqual(asm.stats.scans_completed, 1)
+        self.assertEqual(asm.stats.cycles_missed, 0)
+
 
 class FrameTests(unittest.TestCase):
     def test_parse_real_capture_status_head(self):
@@ -466,6 +569,18 @@ class AssemblerTests(unittest.TestCase):
         self.assertEqual([s.scan_number for s in scans], [0])        # wrap: 0 is newer
         self.assertEqual(asm.stats.stale_datagrams, 0)
 
+    def test_skipped_cycles_are_counted(self):
+        """An RSL 235 at telegram interval 1 skips every 11th cycle: the gap is visible in the stats."""
+        asm = UdtAssembler()
+        got = []
+        for n in (1, 2, 4, 5, 8):                                   # cycles 3, 6, 7 never sent
+            got += asm.feed_datagram(make_status_datagram(n))
+            got += asm.feed_datagram(make_measurement_datagram(n, 0, [n] * 271, [1] * 271))
+        self.assertEqual([s.scan_number for s in got], [1, 2, 4, 5, 8])
+        self.assertEqual(asm.stats.cycles_missed, 3)
+        self.assertEqual(asm.stats.sequence_jumps, 0)
+        self.assertEqual(asm.stats.stale_datagrams, 0)
+
     def test_duplicate_or_late_datagram_is_ignored(self):
         """A finished scan is never delivered twice (regression)."""
         asm = UdtAssembler()
@@ -559,6 +674,7 @@ class AssemblerTests(unittest.TestCase):
         got += asm.feed_datagram(make_measurement_datagram(501, 0, [5] * 271, [1] * 271))
         self.assertEqual([s.scan_number for s in got], [500, 501])
         self.assertEqual(asm.stats.sequence_jumps, 1)
+        self.assertEqual(asm.stats.cycles_missed, 498)
         self.assertIsNone(got[0].status)                          # its status arrived unconfirmed
         self.assertEqual(got[1].status.scan_number, 501)
 
@@ -645,7 +761,7 @@ class ScanViewTests(unittest.TestCase):
         self.assertAlmostEqual(angles[0], 135.0)          # index 0 at the CCW edge
         self.assertAlmostEqual(angles[1], 134.0)          # 5 indices * 0.2 deg
         self.assertAlmostEqual(angles[-1], -135.0)
-        self.assertEqual(scan.no_echo_mm, 32767)
+        self.assertEqual(scan.no_echo_mm, 65535)
         self.assertEqual(scan.geometry, GEOMETRY[ScannerFamily.RSL200])
 
     def test_rsl400_geometry(self):
@@ -662,13 +778,17 @@ class ScanViewTests(unittest.TestCase):
                          [-137.5, -137.0, -136.5])
 
     def test_no_echo_sentinel_handling(self):
-        """Real RSL 235 hardware reports 32767 mm for beams without echo."""
-        scan = self.make_scan(contour=(0, 15, 5), values=[1000, 32767, 0, 2000])
-        self.assertEqual(scan.valid_mask(), [True, False, False, True])
+        """RSL 235 hardware sends 65535 for no echo; the spec's range top 32767 is invalid too."""
+        scan = self.make_scan(contour=(0, 20, 5), values=[1000, 65535, 0, 2000, 32767])
+        self.assertEqual(scan.valid_mask(), [True, False, False, True, False])
         self.assertEqual(len(scan.to_cartesian()), 2)
-        self.assertEqual(len(scan.to_cartesian(skip_invalid=False)), 4)
-        self.assertEqual(scan.valid_mask(max_valid_mm=1500), [True, False, False, False])
+        self.assertEqual(len(scan.to_cartesian(skip_invalid=False)), 5)
+        self.assertEqual(scan.valid_mask(max_valid_mm=1500), [True, False, False, False, False])
         self.assertEqual(len(scan.to_cartesian(max_valid_mm=1500)), 1)
+        # the RSL 400 range reaches 65534: only 0 and 65535 are invalid there
+        scan400 = self.make_scan(family=ScannerFamily.RSL400, contour=(0, 3, 1),
+                                 values=[32767, 65534, 65535, 0])
+        self.assertEqual(scan400.valid_mask(), [True, True, False, False])
 
     def test_rsl400_sentinel_is_65535(self):
         scan = self.make_scan(family=ScannerFamily.RSL400, contour=(0, 3, 1),

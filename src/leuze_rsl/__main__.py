@@ -55,10 +55,14 @@ def _run_udt(args: argparse.Namespace) -> int:
             print(line)
         status = receiver.latest_status
         if status is not None:
-            print("status: family=%s mode=%d error=%s ossd=%s protective_field_violated=%s"
-                  % (status.family.name if status.family is not None else "unknown",
-                     status.operating_mode, status.error, status.ossd_a,
-                     status.a_protective_violated))
+            line = ("status: family=%s mode=%d error=%s ossd=%s protective_field_violated=%s"
+                    % (status.family.name if status.family is not None else "unknown",
+                       status.operating_mode, status.error, status.ossd_a,
+                       status.a_protective_violated))
+            if status.supply_voltage_v is not None and status.temperature_c is not None:
+                line += "  supply=%.1f V  temperature=%.1f degC" % (
+                    status.supply_voltage_v, status.temperature_c)
+            print(line)
         contour = receiver.contour
         if contour is not None:
             print("contour: indices %d..%d step %d -> %d beams"

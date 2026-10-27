@@ -42,6 +42,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(out.count("beams in"), 2)
         self.assertIn("family=RSL200", out)
+        self.assertIn("supply=23.4 V  temperature=23.5 degC", out)
         self.assertIn("contour: indices 0..1350 step 5 -> 271 beams", out)
         self.assertEqual(err, "")                      # quiet by default
 

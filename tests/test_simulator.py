@@ -299,22 +299,24 @@ class UdtMeasurementTests(unittest.TestCase):
         self.assertAlmostEqual(max(abs(v) for v in xs), 3.0, delta=0.02)
         self.assertAlmostEqual(max(abs(v) for v in ys), 2.0, delta=0.02)
 
-    def test_no_echo_beams_are_32767_on_rsl200(self):
+    def test_no_echo_beams_are_65535_with_signal_65535(self):
+        """As captured from an RSL 235: distance 0xFFFF and signal strength 0xFFFF."""
         sim = UdtSimulator(no_echo_indices={0, 135, 270}, beams_per_datagram=100)
         asm, scans = self._assemble(sim)
         scan = scans[0]
-        self.assertEqual([scan.distances_mm[i] for i in (0, 135, 270)], [32767] * 3)
-        self.assertEqual([scan.signal_strengths[i] for i in (0, 135, 270)], [0] * 3)
+        self.assertEqual([scan.distances_mm[i] for i in (0, 135, 270)], [65535] * 3)
+        self.assertEqual([scan.signal_strengths[i] for i in (0, 135, 270)], [65535] * 3)
         mask = scan.valid_mask()
         self.assertEqual([mask[i] for i in (0, 135, 270)], [False] * 3)
         self.assertEqual(sum(mask), 268)
         self.assertEqual(len(scan.to_cartesian()), 268)
-        self.assertEqual(scan.no_echo_mm, 32767)
+        self.assertEqual(scan.no_echo_mm, 65535)
+        self.assertEqual(scan.status.supply_voltage_v, 23.4)
 
     def test_beams_beyond_max_range_have_no_echo(self):
         # open room (walls far away) but a 25 m range: nothing comes back
         sim = UdtSimulator(room_half_width_mm=10 ** 6, room_half_height_mm=10 ** 6)
-        self.assertEqual(set(sim.beam_values()), {32767})
+        self.assertEqual(set(sim.beam_values()), {65535})
         # RSL 400: the no-echo value is the top of its 16-bit distance range
         sim400 = UdtSimulator(family=ScannerFamily.RSL400, room_half_width_mm=10 ** 6,
                               room_half_height_mm=10 ** 6, no_echo_indices={5})

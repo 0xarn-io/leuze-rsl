@@ -24,7 +24,15 @@ angles and status fields decode differently (correctly) for an RSL 235.
 - **Field-violation flags had inverted polarity** (`*_violated` was True when
   the field was free) for the RSL 400 layout.
 - **Beam angles were compressed 2×** for the RSL 200 series: one index is
-  0.2°, not 0.1° (the specification limits RSL 200 indices to 0…1350).
+  0.2°, not 0.1° (the specification limits RSL 200 indices to 0…1350;
+  Sensor Studio labels the index fields "× 0.2°").
+- **No-echo value.** RSL 235 hardware sends 65535 (0xFFFF, with a signal
+  strength of 0xFFFF) for beams without a valid echo, not the 32767 that
+  earlier releases documented. `NO_ECHO_DISTANCE_MM` is now 65535;
+  `valid_mask()` rejects 0, 65535 and anything above the family's spec
+  range (`BeamGeometry.max_valid_mm`: 32766 for RSL 200, 65534 for RSL 400),
+  so both values are invalid either way. The simulator emits the hardware
+  values.
 - Strict mode could emit truncated scans (lost first/last block, or no
   contour known yet) and could deliver a scan twice (late/duplicated
   datagram). Scans are now complete only when blocks 0…n are all present and
@@ -75,6 +83,14 @@ angles and status fields decode differently (correctly) for an RSL 235.
 
 - `examples/record_udt.py`: records raw UDP data telegrams to a file with the
   standard library only, for offline analysis and bug reports.
+- `StatusProfile.supply_voltage_v`: supply voltage in volts. The unit of the
+  VOLT field is 0.1 V (an RSL 235 on a 24 V supply sends 234); the
+  specification's "0.1 mV" is a documentation error.
+- `UdtStats.cycles_missed`: scan numbers never seen between consecutive
+  cycles. An RSL 235 at telegram interval 1 skips every 11th cycle.
+- `python -m leuze_rsl` prints the supply voltage and temperature.
+- One complete cycle captured from an RSL 235 (status + 271-beam
+  distance/signal datagram) is decoded byte for byte in the test suite.
 
 ### Changed
 

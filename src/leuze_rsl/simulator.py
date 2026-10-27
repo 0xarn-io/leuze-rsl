@@ -725,11 +725,13 @@ class UdtSimulator:
     * ``ScannerFamily.RSL200`` (default; the RSL 235): type 21, 28-byte
       profile, contour at offset 28 -> 56-byte status datagram; default
       contour ``(0, 1350, 5)`` = 271 beams; beams step -0.2 deg from +135 deg
-      (index 0); no echo = 32767 mm.
+      (index 0).
     * ``ScannerFamily.RSL400``: type 1, 20-byte profile, contour at offset
       20 -> 48-byte status datagram (60 with ``signature``); default contour
-      ``(0, 2699, 1)`` = 2700 beams; -0.1 deg per index from +134.95 deg;
-      no echo = 65535 mm.
+      ``(0, 2699, 1)`` = 2700 beams; -0.1 deg per index from +134.95 deg.
+
+    Beams without echo carry distance 65535 and signal strength 65535, as
+    captured from an RSL 235.
 
     Beam geometry and the no-echo values come from
     :data:`leuze_rsl.udt.GEOMETRY`, so the simulated room is consistent with
@@ -768,8 +770,9 @@ class UdtSimulator:
         ScannerFamily.RSL200: (0, 1350, 5),
         ScannerFamily.RSL400: (0, 2699, 1),
     }
-    #: Raw VOLT field of the RSL 200 profile (the spec's unit is ambiguous).
-    SUPPLY_VOLTAGE_RAW = 2400
+    #: Raw VOLT field of the RSL 200 profile [0.1 V]: 23.4 V, as captured
+    #: from an RSL 235 on a 24 V supply.
+    SUPPLY_VOLTAGE_RAW = 234
     #: TEMP field of the RSL 200 profile: 23.5 degC in [0.1 degC].
     TEMPERATURE_RAW = 235
 
@@ -1015,7 +1018,8 @@ class UdtSimulator:
                 values: List[int] = []
                 for d in chunk:
                     values.append(d)
-                    values.append(0 if d == no_echo else max(100, min(50000, d // 2)))
+                    # hardware sends signal strength 0xFFFF together with a no-echo distance
+                    values.append(65535 if d == no_echo else max(100, min(50000, d // 2)))
                 payloads.append(struct.pack("<%dH" % len(values), *values))
             else:
                 payloads.append(struct.pack("<%dH" % len(chunk), *chunk))

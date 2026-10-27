@@ -122,11 +122,12 @@ _PROFILE_LENGTH = {STATUS_PROFILE_TYPE_RSL200: 28, STATUS_PROFILE_TYPE_RSL400: 2
 CONTOUR_SIZE = 8
 _CONTOUR_STRUCT = struct.Struct("<HHHH")
 
-#: Distance value reported by RSL 235 hardware for beams without a valid
-#: echo: 32767 mm (0x7FFF), the top of the RSL 200 distance range (spec
-#: section 3.3.3: "RSL 200: 0 ... 32767 mm").  Kept for compatibility; use
-#: :attr:`UdtScan.no_echo_mm` for the family-specific value.
-NO_ECHO_DISTANCE_MM = 32767
+#: Distance value RSL 235 hardware sends for beams without a valid echo:
+#: 65535 (0xFFFF, with a signal strength of 0xFFFF), observed in a capture
+#: of 2026-10-27.  Earlier releases documented 32767, the top of the spec's
+#: RSL 200 distance range; that value never occurred on hardware but is
+#: still treated as invalid by :meth:`UdtScan.valid_mask`.
+NO_ECHO_DISTANCE_MM = 65535
 
 
 class ScannerFamily(IntEnum):
@@ -156,7 +157,8 @@ class BeamGeometry:
     index_step_deg: float      #: signed angular step per beam index (negative = clockwise)
     angle_at_index0_deg: float  #: angle of beam index 0
     max_index: int             #: highest beam index the device can transmit
-    no_echo_mm: int            #: distance value meaning "no valid echo"
+    no_echo_mm: int            #: distance value the device sends for "no valid echo"
+    max_valid_mm: int          #: largest distance that is a real measurement (spec range top - 1)
 
     # Leuze's RSL 400 ROS driver maps the reversed 2700 beams onto exactly
     # -135.0 .. +134.9 deg (index 2699 at -135.0); the defaults below centre
@@ -166,14 +168,16 @@ class BeamGeometry:
         return self.angle_at_index0_deg + index * self.index_step_deg
 
 
-#: Per-family default beam geometry (see :class:`BeamGeometry`).  The RSL 400
-#: no-echo value is inferred from the spec's distance range (0..65535 mm);
-#: the RSL 200 value was observed on hardware.
+#: Per-family default beam geometry (see :class:`BeamGeometry`).  The RSL 200
+#: no-echo value (65535) was observed on an RSL 235; the RSL 400 is assumed
+#: to send the same (the top of its 0..65535 mm range).  ``max_valid_mm`` is
+#: one below the spec's distance range top (RSL 200: 0..32767 mm, RSL 400:
+#: 0..65535 mm), so both the no-echo value and the range top are invalid.
 GEOMETRY: Dict[ScannerFamily, BeamGeometry] = {
     ScannerFamily.RSL200: BeamGeometry(index_step_deg=-0.2, angle_at_index0_deg=135.0,
-                                       max_index=1350, no_echo_mm=32767),
+                                       max_index=1350, no_echo_mm=65535, max_valid_mm=32766),
     ScannerFamily.RSL400: BeamGeometry(index_step_deg=-0.1, angle_at_index0_deg=134.95,
-                                       max_index=2699, no_echo_mm=65535),
+                                       max_index=2699, no_echo_mm=65535, max_valid_mm=65534),
 }
 #: Geometry assumed when the device family is not known (RSL 200 / RSL 235).
 DEFAULT_GEOMETRY = GEOMETRY[ScannerFamily.RSL200]
@@ -258,7 +262,7 @@ class StatusProfile:
     field_triple: Optional[int]           #: selected field triple (1..32)
     inputs: Optional[int]                 #: control inputs IN1..IN8 as a bit mask (bit 0 = IN1)
     outputs: Optional[int]                #: outputs OUT1..OUT8 as a bit mask (bit 0 = OUT1)
-    supply_voltage_raw: Optional[int]     #: VOLT field as sent (spec says [0.1 mV]; 16 bit cannot hold 24 V, so verify the unit)
+    supply_voltage_raw: Optional[int]     #: VOLT field as sent, in 0.1 V (see :attr:`supply_voltage_v`)
     temperature_c: Optional[float]        #: device temperature [deg C]
     signature: Optional[int]              #: SAFE_SIG
     error_class: Optional[int]
@@ -272,6 +276,16 @@ class StatusProfile:
     b_field_pair: Optional[int]
     configuration_signature: Optional[bytes]  #: 8-byte signature trailer, when transmitted
     raw: bytes                            #: complete data block (status + contour + trailer)
+
+    @property
+    def supply_voltage_v(self) -> Optional[float]:
+        """Supply voltage [V] (RSL 200 only; ``None`` for other profiles).
+
+        The specification states the VOLT unit as 0.1 mV, which a 16-bit
+        field cannot hold for a 24 V device; an RSL 235 on a 24 V supply
+        sends 234, so the unit is 0.1 V (23.4 V behind the input diode).
+        """
+        return None if self.supply_voltage_raw is None else self.supply_voltage_raw / 10.0
 
     @classmethod
     def from_bytes(cls, data: Union[bytes, bytearray, memoryview]) -> "StatusProfile":
@@ -486,10 +500,12 @@ class UdtScan:
     def valid_mask(self, max_valid_mm: Optional[int] = None) -> List[bool]:
         """Per beam: True if the distance is a real measurement.
 
-        0 mm and the family's no-echo value (RSL 200: 32767 mm; RSL 400:
-        65535 mm) -- or anything above ``max_valid_mm`` -- count as invalid.
+        0 mm, the no-echo value (65535 on RSL 235 hardware, sent with a
+        signal strength of 65535) and anything above the family's distance
+        range (RSL 200: 32767 mm, RSL 400: 65535 mm) count as invalid, as
+        does anything above ``max_valid_mm`` when given.
         """
-        limit = self.no_echo_mm - 1 if max_valid_mm is None else max_valid_mm
+        limit = self.geometry.max_valid_mm if max_valid_mm is None else max_valid_mm
         return [0 < d <= limit for d in self.distances_mm]
 
     def beam_indices(self) -> List[int]:
@@ -574,6 +590,7 @@ class UdtStats:
     outlier_datagrams: int = 0         #: datagrams far ahead of the stream, awaiting confirmation
     sequence_resets: int = 0           #: scan counter jumped backwards (scanner restarted)
     sequence_jumps: int = 0            #: scan counter jumped forwards (receiver offline / cycles lost)
+    cycles_missed: int = 0             #: scan numbers never seen between consecutive cycles (skipped by the device or lost)
     bytes_discarded: int = 0           #: partial trailing beam bytes dropped
 
 
@@ -725,6 +742,7 @@ class UdtAssembler:
                 or (_scan_newer(scan_number, candidate)
                     and ((scan_number - candidate) & 0xFFFFFFFF) <= _FORWARD_WINDOW))
             if ahead <= _FORWARD_WINDOW or confirmed:
+                self.stats.cycles_missed += ahead - 1
                 if ahead > _FORWARD_WINDOW:
                     self.stats.sequence_jumps += 1
                     log.info("scan counter jumped from %d to %d: receiver offline or cycles lost?",

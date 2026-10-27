@@ -61,7 +61,7 @@ from leuze_rsl import RSL235Udt
 with RSL235Udt(port=3050) as receiver:          # the port configured above
     scan = receiver.get_scan(timeout=5.0)       # one complete scan cycle
     print(scan.scan_number, scan.family,        # e.g. ScannerFamily.RSL200
-          scan.distances_mm[:5],                # [mm], 32767 = no echo (RSL 200)
+          scan.distances_mm[:5],                # [mm], 65535 = no echo
           scan.angles_deg()[:5])                # beam angles
     if scan.signal_strengths:                   # None for data type ID 6
         print(scan.signal_strengths[:5])
@@ -74,7 +74,7 @@ Every `UdtScan` exposes:
 
 | attribute | meaning |
 |---|---|
-| `distances_mm` / `distances_m` | distance per beam; 0 or the family's no-echo value (RSL 200: 32767, RSL 400: 65535) = no valid echo |
+| `distances_mm` / `distances_m` | distance per beam; 0, 65535 (no echo) or anything above the family's range (RSL 200: 32767, RSL 400: 65535) = no valid echo |
 | `signal_strengths` | signal strength per beam [digits], or `None` |
 | `valid_mask()` | per beam: real measurement or not |
 | `beam_indices()` / `angles_deg()` | beam geometry from the measurement contour (see [angle convention](#angle-convention)) |
@@ -182,7 +182,7 @@ byte, followed by the 8-byte **measurement contour description**
 | 4 | selected field triple (1…32) |
 | 5 | bit 0 SSREC |
 | 6 / 7 | control inputs IN1…IN8 / outputs OUT1…OUT8 (bit 0 = 1) |
-| 8–9 / 10–11 | VOLT (u16, spec: 0.1 mV) / TEMP (u16, 0.1 °C) |
+| 8–9 / 10–11 | VOLT (u16, **0.1 V** — the spec says 0.1 mV, but an RSL 235 on a 24 V supply sends 234; `status.supply_voltage_v`) / TEMP (u16, 0.1 °C) |
 | 12–15 | reserved |
 | 16–19 | SCAN_NUM (u32; expected to equal the frame's scan number, as observed on RSL 400 captures — the driver keys status on the frame's number) |
 | 20–23 | SAFE_SIG |
@@ -210,19 +210,27 @@ bytes, firmware ≥ 5.6):*
 **ID 6 — distance**: n × `u16` distance [mm]. **ID 3 — distance + signal
 strength**: n × (`u16` distance [mm] + `u16` signal strength [digits]).
 Large scans are split across datagrams with consecutive `block` numbers;
-all datagrams of one cycle share the `scan_number`. Distances: RSL 200
-0…32767 mm, RSL 400 0…65535 mm; real RSL 235 hardware reports **32767**
-(0x7FFF) for beams without a valid echo and 0 also counts as invalid
-(`scan.valid_mask()`, `scan.no_echo_mm`).
+all datagrams of one cycle share the `scan_number`. The spec gives the
+distance range as 0…32767 mm (RSL 200) and 0…65535 mm (RSL 400). Real
+RSL 235 hardware reports **65535** (0xFFFF, with a signal strength of
+0xFFFF) for beams without a valid echo (capture of 2026-10-27; the 32767
+claimed by earlier releases was never observed). `scan.valid_mask()` treats
+0, the no-echo value and anything above the family's range as invalid.
 
 A capture from real RSL 235 hardware (56-byte status + single 1104-byte
 distance+signal datagram = 271 beams per cycle, i.e. the full-range contour
-0…1350 step 5):
+0…1350 step 5; one complete cycle is checked byte for byte in
+`tests/test_udt.py`):
 
 ```
 38 00 00 00 08 00 06 00 04 0b 01 32 01 00 00 00 ...   ID 1, 56 B
 50 04 00 00 08 00 06 00 04 0b 01 32 03 00 00 00 ...   ID 3, 1104 B
 ```
+
+Observed on that device with *telegram interval* 1 (every 25 ms scan):
+the scan counter advances at 40 Hz, but every 11th cycle is not transmitted
+at all (a 48 ms gap, both telegrams missing). The receiver reports such
+gaps in `stats.cycles_missed`; they are not reassembly failures.
 
 ---
 
