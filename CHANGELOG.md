@@ -71,6 +71,11 @@ angles and status fields decode differently (correctly) for an RSL 235.
   optional), can inject invalid measurements, and their threads report
   failures instead of dying silently.
 
+### Added
+
+- `examples/record_udt.py`: records raw UDP data telegrams to a file with the
+  standard library only, for offline analysis and bug reports.
+
 ### Changed
 
 - **Angle convention.** `angles_deg()` / `to_cartesian()` default to the
