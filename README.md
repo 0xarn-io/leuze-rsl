@@ -142,11 +142,12 @@ y left), which is what `to_cartesian()` uses; `index_resolution` is the
 Leuze's RSL 400 ROS driver maps the 2700 reversed indices onto exactly
 −135.0°…+134.9°; the defaults above centre the beams symmetrically instead
 (half a step apart). The RSL 200's measurement indices span 270° while its
-protective-field scanning angle is 275°. **Verify the mapping once against
-a known target** (the sign and offset of index 0 come from Leuze's RSL 400
-driver, not from the UDP document) and pass your own `angle_at_index0` /
-`index_resolution` to `angles_deg()` / `to_cartesian()` if your device or
-mounting differs.
+protective-field scanning angle is 275°. The sign and offset of index 0
+come from Leuze's RSL 400 ROS driver, not from the UDP document; they were
+verified on an RSL 235 (2026-10-27) by matching a decoded scan, wall by
+wall, against Sensor Studio's live contour view of the same unit. Pass
+your own `angle_at_index0` / `index_resolution` to `angles_deg()` /
+`to_cartesian()` if your device or mounting differs.
 
 ## Protocol reference
 

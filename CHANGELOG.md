@@ -86,6 +86,10 @@ angles and status fields decode differently (correctly) for an RSL 235.
 - `examples/record_udt.py`: records raw UDP data telegrams to a file with the
   standard library only, for offline analysis and bug reports; several
   scanners (one port each) can be recorded at once, one file per port.
+- `RodSimulator(port=0)` only accepts an ephemeral port that can also be
+  bound for UDP, since a client binds the same number for the measurement
+  data; Windows excludes port ranges per protocol and refused the UDP bind
+  (`WSAEACCES`) on a CI runner.
 - Receiver threads are named after their port (`leuze_rsl-udt-rx:<port>`)
   and receiver failures name the port, so a process serving several
   scanners can tell them apart; a six-scanner test covers that setup.
@@ -96,6 +100,8 @@ angles and status fields decode differently (correctly) for an RSL 235.
   cycles. RSL 235 units at telegram interval 1 skip cycles at a
   unit-specific rate (from 1 in 400 to every 11th).
 - `python -m leuze_rsl` prints the supply voltage and temperature.
+- The beam direction (index 0 at +135°, indices increasing clockwise) was
+  verified on an RSL 235 against Sensor Studio's live contour view.
 - Two complete cycles captured from RSL 235 units (status + 271-beam
   distance/signal datagram; one unconfigured on the bench, one in safety
   mode in the field) are decoded byte for byte in the test suite.

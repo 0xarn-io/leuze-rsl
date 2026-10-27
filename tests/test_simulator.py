@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
 import leuze_rsl
 from leuze_rsl import simulator as simulator_module
@@ -618,6 +619,28 @@ class RodSimulatorLifecycleTests(unittest.TestCase):
             sim.start()
         self.assertFalse(sim.running)
         self.assertEqual(threads_named("rodsim-accept"), [])
+
+    def test_ephemeral_port_is_bindable_for_udp_too(self):
+        """A client binds the command port number for UDP as well, as the real device pushes there."""
+        sim = RodSimulator().start()
+        self.addCleanup(sim.stop)
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.bind(("", sim.port))                       # must not raise
+        finally:
+            probe.close()
+        # a port the OS hands out for TCP but refuses for UDP is given back
+        import leuze_rsl.simulator as simulator_module
+        with mock.patch.object(simulator_module, "_udp_bindable", side_effect=[False, False, True]) as probe_fn:
+            sim2 = RodSimulator().start()
+            self.addCleanup(sim2.stop)
+        self.assertEqual(probe_fn.call_count, 3)
+        self.assertTrue(sim2.running)
+        # an explicit udp_dest_port skips the probe (the client binds that port instead)
+        with mock.patch.object(simulator_module, "_udp_bindable", side_effect=AssertionError) as probe_fn:
+            sim3 = RodSimulator(udp_dest_port=free_udp_port()).start()
+            self.addCleanup(sim3.stop)
+        self.assertEqual(probe_fn.call_count, 0)
 
     def test_commands_received_is_bounded(self):
         sim = RodSimulator().start()

@@ -150,7 +150,8 @@ class BeamGeometry:
     Leuze's own RSL 400 ROS driver, which maps index 0 to the counter-
     clockwise edge of a 270 deg field of view centred on the device front
     (indices increase clockwise; angles are counter-clockwise positive, as
-    in a right-handed x-forward / y-left frame).  Verify the mapping once
+    in a right-handed x-forward / y-left frame; verified on an RSL 235
+    against Sensor Studio's live contour view).  Verify the mapping once
     against a known target and override via :meth:`UdtScan.angles_deg` if
     your mounting differs.
     """

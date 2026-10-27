@@ -88,6 +88,20 @@ EXIT_ERROR = 1
 EXIT_INTERRUPTED = 130
 
 
+def _udp_bindable(port: int) -> bool:
+    """True if a UDP socket can be bound to ``port`` on all interfaces right now."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        if sys.platform == "win32":
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        probe.bind(("", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
 def _room_distance_mm(angle_deg: float, half_width_mm: int, half_height_mm: int) -> float:
     """Analytic ray cast from the centre of a rectangular room to its wall."""
     a = math.radians(angle_deg)
@@ -286,6 +300,28 @@ class RodSimulator:
             stale, self._listen_sock = self._listen_sock, None
             if stale is not None:
                 stale.close()
+            sock = self._bind_listener()
+            self.port = sock.getsockname()[1]
+            self._listen_sock = sock
+            self._closing = False
+            self._running = True
+            self._accept_thread = threading.Thread(
+                target=self._accept_loop, args=(sock,),
+                name="rodsim-accept", daemon=True)
+            self._accept_thread.start()
+            log.info("ROD simulator listening on %s:%d", self.host, self.port)
+            return self
+
+    def _bind_listener(self) -> socket.socket:
+        """Bind and listen on the command port.
+
+        With ``port`` 0 the OS picks an ephemeral port, and a client binds
+        the *same* number for UDP (the real device pushes to the command
+        port).  Windows excludes port ranges per protocol, so a number the
+        OS hands out for TCP may be refused for UDP (WSAEACCES); such a
+        port is given back and another one is tried.
+        """
+        for _ in range(32):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 if os.name != "nt":
@@ -298,16 +334,11 @@ class RodSimulator:
             except OSError:
                 sock.close()
                 raise
-            self.port = sock.getsockname()[1]
-            self._listen_sock = sock
-            self._closing = False
-            self._running = True
-            self._accept_thread = threading.Thread(
-                target=self._accept_loop, args=(sock,),
-                name="rodsim-accept", daemon=True)
-            self._accept_thread.start()
-            log.info("ROD simulator listening on %s:%d", self.host, self.port)
-            return self
+            if (self.port != 0 or self._udp_dest_port is not None
+                    or _udp_bindable(sock.getsockname()[1])):
+                return sock
+            sock.close()
+        raise OSError("no ephemeral port usable for both TCP and UDP found")
 
     def stop(self) -> None:
         """Stop streaming, drop the client and close the listen socket (idempotent)."""
