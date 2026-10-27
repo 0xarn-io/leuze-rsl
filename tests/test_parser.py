@@ -159,9 +159,9 @@ class ScanViewTests(unittest.TestCase):
 
     def test_angle_and_distance_views(self):
         scan = self.make_scan()
-        self.assertEqual(scan.angles_deg, [-90.0, -45.0, 0.0, 45.0, 90.0])
+        self.assertEqual(scan.angles_deg, (-90.0, -45.0, 0.0, 45.0, 90.0))
         self.assertAlmostEqual(scan.angles_rad[0], -math.pi / 2)
-        self.assertEqual(scan.distances_m, [1.0, 0.0, 2.0, 0.5, 3.0])
+        self.assertEqual(scan.distances_m, (1.0, 0.0, 2.0, 0.5, 3.0))
 
     def test_to_cartesian(self):
         scan = self.make_scan()

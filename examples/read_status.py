@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Dump configuration and status of an RSL 235 via the TCP command interface.
+"""Dump configuration and status of a Leuze ROD 308/508 scanner via its TCP command interface.
 
     python3 examples/read_status.py 192.168.60.101
     python3 examples/read_status.py --simulate
 """
 
 import argparse
+import enum
 import sys
 from pathlib import Path
 
@@ -19,17 +20,20 @@ from leuze_rsl import RSL235
 
 
 def fmt(value):
-    import enum
     if isinstance(value, enum.Enum):
         return "%s (%d)" % (value.name, value.value)
     return value
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("host", nargs="?", default="192.168.60.101")
-    parser.add_argument("--port", type=int, default=leuze_rsl.DEFAULT_PORT)
-    parser.add_argument("--simulate", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("host", nargs="?", default="192.168.60.101",
+                        help="scanner IP address (default: %(default)s)")
+    parser.add_argument("--port", type=int, default=leuze_rsl.DEFAULT_PORT,
+                        help="scanner TCP command port (default: %(default)s)")
+    parser.add_argument("--simulate", action="store_true",
+                        help="run against the built-in simulator instead of hardware")
     args = parser.parse_args()
 
     simulator = None
@@ -41,7 +45,7 @@ def main() -> int:
     try:
         with RSL235(args.host, args.port) as scanner:
             status = scanner.get_status()
-            print("RSL235 status (%s:%d)" % (args.host, args.port))
+            print("ROD scanner status (%s:%d)" % (args.host, args.port))
             print("-" * 50)
             print("part number:          %s" % status.part_number)
             print("hw / sw version:      %s / %s" % (status.hw_version, status.sw_version))
@@ -66,7 +70,9 @@ def main() -> int:
             print("MDI stream active:    %s" % status.mdi_tx_active)
             if status.errors:
                 print("fields that failed:   %s" % status.errors)
-    except leuze_rsl.RSL235Error as exc:
+    except KeyboardInterrupt:
+        return 130
+    except (leuze_rsl.RSL235Error, OSError) as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 1
     finally:

@@ -5,3 +5,10 @@ build/
 dist/
 .venv/
 *.zip
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tox/
+.coverage
+coverage.xml
+htmlcov/

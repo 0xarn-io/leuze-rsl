@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Live polar plot of RSL 235 scans (requires matplotlib).
+"""Live polar plot of Leuze ROD 308/508 scans (ROD-300-500 protocol; requires matplotlib).
 
-    python3 examples/live_plot.py 192.168.60.101
-    python3 examples/live_plot.py --simulate
+    python3 examples/live_plot_rod.py 192.168.60.101
+    python3 examples/live_plot_rod.py --simulate
 """
 
 import argparse
@@ -19,16 +19,21 @@ from leuze_rsl import RSL235
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("host", nargs="?", default="192.168.60.101")
-    parser.add_argument("--port", type=int, default=leuze_rsl.DEFAULT_PORT)
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("host", nargs="?", default="192.168.60.101",
+                        help="scanner IP address (default: %(default)s)")
+    parser.add_argument("--port", type=int, default=leuze_rsl.DEFAULT_PORT,
+                        help="scanner TCP command port (default: %(default)s)")
     parser.add_argument("--rmax", type=float, default=10.0,
                         help="plot range in meters (default: %(default)s)")
-    parser.add_argument("--simulate", action="store_true")
+    parser.add_argument("--simulate", action="store_true",
+                        help="run against the built-in simulator instead of hardware")
     args = parser.parse_args()
 
     try:
         import matplotlib.pyplot as plt
+        import numpy as np
     except ImportError:
         print("this example needs matplotlib:  pip install matplotlib",
               file=sys.stderr)
@@ -44,23 +49,23 @@ def main() -> int:
         with RSL235(args.host, args.port) as scanner:
             scanner.start_measurement()
             plt.ion()
-            fig = plt.figure("RSL235 live scan")
+            fig = plt.figure("ROD live scan")
             ax = fig.add_subplot(111, projection="polar")
             scatter = ax.scatter([], [], s=2)
             ax.set_rmax(args.rmax)
-            ax.set_title("RSL235 @ %s" % args.host)
+            ax.set_title("ROD scanner @ %s" % args.host)
             while plt.fignum_exists(fig.number):
                 scan = scanner.get_scan(timeout=5.0)
-                pairs = [(a, d) for a, d in zip(scan.angles_rad, scan.distances_m)
-                         if d > 0.0]
-                scatter.set_offsets(pairs)
+                pairs = [(a, d) for a, d, ok in zip(scan.angles_rad, scan.distances_m,
+                                                    scan.valid_mask()) if ok]
+                scatter.set_offsets(np.array(pairs) if pairs else np.empty((0, 2)))
                 fig.canvas.draw_idle()
                 plt.pause(0.001)
-    except (TimeoutError, leuze_rsl.RSL235Error) as exc:
+    except KeyboardInterrupt:
+        return 130
+    except (leuze_rsl.RSL235Error, OSError) as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 1
-    except KeyboardInterrupt:
-        pass
     finally:
         if simulator is not None:
             simulator.stop()
