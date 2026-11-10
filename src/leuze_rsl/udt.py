@@ -491,6 +491,14 @@ class UdtScan:
     received_at: float                        #: host time.time() of completion (wall clock: can jump)
     received_monotonic: float = 0.0           #: host time.monotonic() of completion (0.0 if not set)
 
+    def __repr__(self) -> str:
+        # The generated repr would print every beam (kilobytes per scan).
+        return ("UdtScan(scan_number=%d, beams=%d, blocks=%d, complete=%s, family=%s, "
+                "telegram_id=%d, status=%s)"
+                % (self.scan_number, len(self.distances_mm), len(self.blocks), self.complete,
+                   self.family.name if self.family is not None else None, self.telegram_id,
+                   "yes" if self.status is not None else "no"))
+
     @property
     def num_beams(self) -> int:
         return len(self.distances_mm)
@@ -1091,6 +1099,7 @@ class RSL235Udt:
         self._lifecycle = threading.Lock()
         self._sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
+        self._previous_thread: Optional[threading.Thread] = None   # receiver of the session being stopped
         self._running = False
         self._last_rx: Optional[float] = None
         self._latest_scan: Optional[UdtScan] = None
@@ -1107,6 +1116,12 @@ class RSL235Udt:
         with self._lifecycle:
             if self._running:
                 return self
+            previous, self._previous_thread = self._previous_thread, None
+            if previous is not None and previous is not threading.current_thread():
+                # A stop() from another thread may still be in progress: the
+                # old receiver thread keeps the port bound until it leaves
+                # recvfrom(), so binding now would fail with "address in use".
+                previous.join(timeout=2.0)
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
                 # No SO_REUSEADDR: a second receiver on the same port must
@@ -1158,8 +1173,10 @@ class RSL235Udt:
             self._running = False
             sock, self._sock = self._sock, None
             thread, self._thread = self._thread, None
-        if sock is not None:
-            sock.close()
+            if thread is not None:
+                self._previous_thread = thread
+            if sock is not None:
+                sock.close()            # inside the lock: a concurrent start() must find the port released
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
             if thread.is_alive():

@@ -33,6 +33,10 @@ units. The decoder and the geometry needed no correction; the receiver did.
   telegrams older than the one held are now ignored and counted in
   `stale_datagrams`; a status held from before a counter restart no longer
   blocks the statuses of the new run. Found by model checking.
+- **`start()` racing a `stop()` from another thread** could fail with
+  "address already in use": the previous session's receiver thread keeps the
+  port bound until it leaves `recvfrom()`. `start()` now waits for it. Found
+  by a concurrency stress test.
 - `examples/record_udt.py` validates its arguments, reports socket and file
   errors without a traceback and no longer overwrites an existing recording
   (`--force` to allow it).
@@ -65,13 +69,16 @@ units. The decoder and the geometry needed no correction; the receiver did.
   the examples.
 - Tests: every single bit of both status profiles is checked against tables
   written from the specification; regression tests for the sequences found
-  by model checking; the record/replay examples run end to end.
+  by model checking; boundary tests for every limit that mutation testing
+  showed to be unpinned (mutation score of the decoding and reassembly logic
+  80 % -> 97 %); the record/replay examples run end to end.
 
 ### Changed
 
 - An unconfirmed cycle more than 8 scan numbers ahead of the stream is
   emitted one datagram later than before (when the next datagram confirms
   it) instead of immediately.
+- `repr()` of a `UdtScan` is one short line instead of every beam.
 - CI: GitHub Actions updated to their current major versions (Node 24
   runtime).
 

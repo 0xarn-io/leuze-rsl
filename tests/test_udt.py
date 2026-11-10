@@ -11,6 +11,7 @@ import threading
 import time
 import unittest
 import warnings
+from unittest import mock
 
 from leuze_rsl.errors import (
     ProtocolError,
@@ -20,9 +21,12 @@ from leuze_rsl.errors import (
     ScanTimeoutError,
 )
 from leuze_rsl.simulator import UdtSimulator
+from leuze_rsl import udt as udt_module
 from leuze_rsl.udt import (
     FRAME_SIZE,
     GEOMETRY,
+    NO_ECHO_DISTANCE_MM,
+    BeamGeometry,
     STATUS_PROFILE_TYPE_RSL200,
     TELEGRAM_ID_DISTANCE,
     TELEGRAM_ID_DISTANCE_SIGNAL,
@@ -552,6 +556,39 @@ class SpecTableBitWalkTests(unittest.TestCase):
         checked = self.walk(base, 20, self.RSL400_BITS, self.RSL400_NUMBERS, self.RSL400_NIBBLES)
         self.assertEqual(checked, 19 * 8)
 
+    def test_rsl400_table_3_5_with_inactive_functions(self):
+        """Same walk from an all-zero profile: only the ACTIVE bits may change anything in bytes 12 and 16."""
+        base = bytearray(20 + 8)
+        base[0] = 1
+        base[20:28] = struct.pack("<HHHH", 0, 2699, 1, 0)
+        bits = dict(self.RSL400_BITS)
+        for byte, letter in ((12, "a"), (16, "b")):
+            del bits[(byte, 0x40)], bits[(byte, 0x20)]             # gated while inactive: no visible change
+            del bits[(byte, 0x80)]
+        base_fields = self.fields(StatusProfile.from_bytes(bytes(base)))
+        for byte, letter in ((12, "a"), (16, "b")):
+            for bit in range(8):
+                data = bytearray(base)
+                data[byte] ^= 1 << bit
+                got = self.fields(StatusProfile.from_bytes(bytes(data)))
+                changed = {k: v for k, v in got.items() if v != base_fields[k]}
+                expected = ({letter + "_active": True, letter + "_protective_violated": True,
+                             letter + "_warning_violated": True} if bit == 7 else {})
+                self.assertEqual(changed, expected, "byte %d bit %d" % (byte, bit))
+        skip = {12, 16}
+        for byte in range(1, 20):
+            if byte in skip:
+                continue
+            for bit in range(8):
+                data = bytearray(base)
+                data[byte] ^= 1 << bit
+                got = self.fields(StatusProfile.from_bytes(bytes(data)))
+                changed = {k: v for k, v in got.items() if v != base_fields[k]}
+                if (byte, 1 << bit) in bits:
+                    self.assertEqual(changed, {bits[(byte, 1 << bit)][0]: bits[(byte, 1 << bit)][1]})
+                elif byte not in (1, 8, 9, 10, 11, 13, 17):
+                    self.assertEqual(changed, {}, "byte %d bit %d" % (byte, bit))
+
     def test_rsl400_field_flags_are_reported_only_while_the_function_is_active(self):
         base = bytearray(20 + 8)
         base[0] = 1                                               # A and B inactive, field bits 0 ("violation")
@@ -564,6 +601,106 @@ class SpecTableBitWalkTests(unittest.TestCase):
         status = StatusProfile.from_bytes(bytes(base))
         self.assertEqual((status.a_protective_violated, status.a_warning_violated), (True, True))
         self.assertEqual((status.b_protective_violated, status.b_warning_violated), (False, False))
+        base[12] = base[16] = 0x80 | 0x1F                         # the five other bits of the byte do not matter
+        status = StatusProfile.from_bytes(bytes(base))
+        self.assertEqual((status.a_protective_violated, status.a_warning_violated), (True, True))
+        self.assertEqual((status.b_protective_violated, status.b_warning_violated), (True, True))
+
+
+class DecodingBoundaryTests(unittest.TestCase):
+    """Exact limits, pinned after mutation testing showed they were not."""
+
+    def test_geometry_constants(self):
+        self.assertEqual(GEOMETRY[ScannerFamily.RSL200], BeamGeometry(-0.2, 135.0, 1350, 65535, 32766))
+        self.assertEqual(GEOMETRY[ScannerFamily.RSL400], BeamGeometry(-0.1, 134.95, 2699, 65535, 65534))
+        self.assertEqual(NO_ECHO_DISTANCE_MM, 65535)
+        self.assertEqual((udt_module._STALE_WINDOW, udt_module._FORWARD_WINDOW), (256, 8))
+        self.assertEqual((udt_module._MAX_FRAGMENTS_PER_SCAN, udt_module._MAX_BYTES_PER_SCAN), (64, 262144))
+
+    def test_status_profile_minimum_lengths(self):
+        with self.assertRaises(ProtocolError):
+            StatusProfile.from_bytes(bytes([99, 0]))                    # 2 bytes: no flags byte
+        self.assertEqual(StatusProfile.from_bytes(bytes([99, 0, 0])).profile_type, 99)
+        self.assertEqual(StatusProfile.from_bytes(rsl200_status_block(1)[:28]).scan_number, 1)   # exactly 28
+        with self.assertRaises(ProtocolError):
+            StatusProfile.from_bytes(rsl200_status_block(1)[:27])
+        rsl400 = RSL400_CAPTURE[FRAME_SIZE:]
+        self.assertEqual(StatusProfile.from_bytes(rsl400[:20]).scan_number, 338286)              # exactly 20
+        with self.assertRaises(ProtocolError):
+            StatusProfile.from_bytes(rsl400[:19])
+
+    def test_unknown_profile_type_has_neutral_defaults(self):
+        status = StatusProfile.from_bytes(bytes([99, 2, 0xFF]) + bytes([0xFF]) * 40)
+        self.assertEqual((status.ossd_a, status.ossd_b, status.parked, status.scan_number), (False, None, False, 0))
+        self.assertEqual((status.a_active, status.a_protective_violated, status.a_warning_violated),
+                         (False, False, False))
+        self.assertEqual((status.b_active, status.b_protective_violated, status.b_warning_violated),
+                         (None, None, None))
+        self.assertEqual((status.profile_length, status.contour_offset), (0, None))
+
+    def test_rsl400_signature_trailer_conditions(self):
+        block = RSL400_CAPTURE[FRAME_SIZE:FRAME_SIZE + 28]
+        signature = bytes(range(0x10, 0x18))
+        self.assertEqual(StatusProfile.from_bytes(block + b"\x01\x00\x08\x00" + signature
+                                                  + b"\xAA\xBB").configuration_signature, signature)   # extra bytes ignored
+        self.assertIsNone(StatusProfile.from_bytes(block + b"\x02\x00\x08\x00" + signature).configuration_signature)
+        self.assertIsNone(StatusProfile.from_bytes(block + b"\x01\x00\x08\x00" + signature[:7]).configuration_signature)
+        self.assertIsNone(StatusProfile.from_bytes(block).configuration_signature)
+
+    def test_contour_value_limits(self):
+        self.assertEqual(MeasurementContour(0, 10, 1).reserved, 0)
+        self.assertEqual(MeasurementContour(0, 0, 1).num_beams, 1)                 # a single beam at index 0
+        self.assertEqual(MeasurementContour(0xFFFF, 0xFFFF, 1).num_beams, 1)
+        self.assertEqual(MeasurementContour(0, 0xFFFF, 1).num_beams, 65536)
+        for bad in ((-1, 5, 1), (0, 0x10000, 1), (0x10000, 0x10000, 1), (0, 5, 0), (6, 5, 1)):
+            with self.subTest(contour=bad), self.assertRaises(ProtocolError):
+                MeasurementContour(*bad)
+
+    def test_contour_plausibility_limits(self):
+        rsl200, rsl400 = ScannerFamily.RSL200, ScannerFamily.RSL400
+        self.assertTrue(MeasurementContour(0, 1350, 8).plausible(rsl200))
+        self.assertFalse(MeasurementContour(0, 1350, 9).plausible(rsl200))          # interval 1..8
+        self.assertFalse(MeasurementContour(0, 1351, 1).plausible(rsl200))          # stop <= 1350
+        self.assertTrue(MeasurementContour(0, 2699, 1).plausible(rsl400))
+        self.assertFalse(MeasurementContour(0, 2700, 1).plausible(rsl400))
+        self.assertTrue(MeasurementContour(0, 2699, 1).plausible())                 # family unknown: widest range
+        self.assertFalse(MeasurementContour(0, 2700, 1).plausible())
+        self.assertFalse(MeasurementContour(7, 7, 1).plausible())                   # start < stop
+        self.assertTrue(MeasurementContour(6, 7, 1).plausible())
+
+    def test_locate_contour_search_rules(self):
+        contour = struct.pack("<HHHH", 0, 100, 1, 0)
+        # found at the very last possible offset, and only at even offsets
+        self.assertEqual(locate_contour(bytes(30) + contour, 101)[0], 30)
+        self.assertIsNone(locate_contour(bytes(31) + contour, 101))
+        # preference: a known profile length first, then a zero reserved field, then the earliest
+        two = bytearray(40)
+        two[4:12] = contour
+        two[28:36] = contour
+        self.assertEqual(locate_contour(bytes(two), 101)[0], 28)
+        two = bytearray(40)
+        two[4:12] = contour
+        two[20:28] = contour
+        self.assertEqual(locate_contour(bytes(two), 101)[0], 20)
+        two = bytearray(40)
+        two[4:12] = struct.pack("<HHHH", 0, 100, 1, 7)             # reserved != 0
+        two[12:20] = contour
+        self.assertEqual(locate_contour(bytes(two), 101)[0], 12)
+        two = bytearray(40)
+        two[4:12] = contour
+        two[12:20] = struct.pack("<HHHH", 1, 101, 1, 0)             # a different contour with the same beam count
+        self.assertEqual(locate_contour(bytes(two), 101), (4, MeasurementContour(0, 100, 1)))
+
+    def test_scan_number_ordering_is_wrap_aware(self):
+        newer = udt_module._scan_newer
+        self.assertTrue(newer(1, 0))
+        self.assertFalse(newer(0, 1))
+        self.assertFalse(newer(5, 5))
+        self.assertTrue(newer(0, 0xFFFFFFFF))                       # across the wrap
+        self.assertFalse(newer(0xFFFFFFFF, 0))
+        self.assertTrue(newer(0x7FFFFFFF, 0))                       # just under half the range
+        self.assertFalse(newer(0x80000000, 0))                      # exactly half: not newer
+        self.assertTrue(newer(0, 0x80000001))
 
 
 class ContourTests(unittest.TestCase):
@@ -958,6 +1095,155 @@ class AssemblerTests(unittest.TestCase):
         self.assertEqual(asm.stats.sequence_resets, 1)
         self.assertEqual(asm.latest_status.scan_number, 10)
 
+    def test_forward_window_boundary(self):
+        """Up to 8 scan numbers ahead is the same stream; 9 ahead needs confirmation."""
+        asm = UdtAssembler()
+        asm.feed_datagram(make_status_datagram(100))
+        asm.feed_datagram(make_measurement_datagram(100, 0, [1] * 271, [1] * 271))
+        got = asm.feed_datagram(make_measurement_datagram(108, 0, [2] * 271, [1] * 271))     # 8 ahead
+        self.assertEqual([s.scan_number for s in got], [108])
+        self.assertEqual((asm.stats.cycles_missed, asm.stats.outlier_datagrams, asm.stats.sequence_jumps), (7, 0, 0))
+        self.assertEqual(asm.feed_datagram(make_measurement_datagram(117, 0, [3] * 271, [1] * 271)), [])   # 9 ahead
+        self.assertEqual(asm.stats.outlier_datagrams, 1)
+        got = asm.feed_datagram(make_status_datagram(125))          # 8 after the candidate: confirms it
+        self.assertEqual([s.scan_number for s in got], [117])
+        self.assertEqual((asm.stats.sequence_jumps, asm.stats.cycles_missed), (1, 7 + 16))
+        self.assertEqual(asm.feed_datagram(make_status_datagram(140)), [])                  # 15 ahead: outlier again
+        self.assertEqual(asm.feed_datagram(make_status_datagram(149)), [])                  # 9 after it: no confirmation
+        self.assertEqual(asm.stats.outlier_datagrams, 3)
+        self.assertEqual(asm.latest_status.scan_number, 125)
+
+    def test_a_second_stray_replaces_the_first(self):
+        asm = UdtAssembler(strict=False)
+        asm.feed_datagram(make_status_datagram(100))
+        asm.feed_datagram(make_measurement_datagram(100, 0, [1] * 271, [1] * 271))
+        asm.feed_datagram(make_measurement_datagram(5000, 0, [7] * 100, [1] * 100))         # stray, incomplete
+        self.assertEqual(sorted(asm._pending), [5000])
+        asm.feed_datagram(make_measurement_datagram(9000, 0, [8] * 100, [1] * 100))         # another stray
+        self.assertEqual(sorted(asm._pending), [9000])
+        asm.feed_datagram(make_measurement_datagram(9000, 1, [8] * 100, [1] * 100))         # same number: confirmed
+        got = asm.feed_datagram(make_status_datagram(9001))
+        self.assertEqual([(s.scan_number, s.complete, s.num_beams) for s in got], [(9000, False, 200)])
+        self.assertEqual(len(asm._pending), 0)
+
+    def test_stale_window_and_restart_gap_boundaries(self):
+        clock = mock.Mock()
+        clock.monotonic.return_value = 1000.0
+        clock.time.return_value = 1.7e9
+        with mock.patch.object(udt_module, "time", clock):
+            def run(back_by, pause):
+                asm = UdtAssembler()
+                asm.feed_datagram(make_status_datagram(10000))
+                asm.feed_datagram(make_measurement_datagram(10000, 0, [1] * 271, [1] * 271))
+                clock.monotonic.return_value += pause
+                got = asm.feed_datagram(make_measurement_datagram(10000 - back_by, 0, [2] * 271, [1] * 271))
+                return len(got), asm.stats.stale_datagrams, asm.stats.sequence_resets
+            self.assertEqual(run(256, 0.5), (0, 1, 0))              # 256 back within a second: late datagram
+            self.assertEqual(run(257, 0.5), (1, 0, 1))              # further back: the counter restarted
+            self.assertEqual(run(1, 0.999), (0, 1, 0))              # just under the restart pause
+            self.assertEqual(run(1, 1.0), (1, 0, 1))                # a pause of 1 s: restart
+
+    def test_restart_adopts_the_status_that_announces_it(self):
+        asm = UdtAssembler()
+        asm.feed_datagram(make_status_datagram(5000))
+        asm.feed_datagram(make_measurement_datagram(5000, 0, [1] * 271, [1] * 271))
+        asm.feed_datagram(make_status_datagram(3, ossd=False))      # 4997 back: restart
+        self.assertEqual(asm.stats.sequence_resets, 1)
+        self.assertEqual(asm.latest_status.scan_number, 3)
+        scans = asm.feed_datagram(make_measurement_datagram(3, 0, [2] * 271, [1] * 271))
+        self.assertEqual(scans[0].status.scan_number, 3)
+        self.assertFalse(scans[0].status.ossd_a)
+
+    def test_byte_limit_per_scan_boundary(self):
+        asm = UdtAssembler(strict=False)
+        chunk = 65536                                               # bytes per fragment: 4 fragments = the limit
+        beams = chunk // 2
+        for block in range(4):
+            asm.feed_datagram(make_measurement_datagram(1, block, [1] * beams))
+        self.assertEqual(asm.stats.scans_dropped_oversize, 0)       # exactly 256 KiB is still accepted
+        asm.feed_datagram(make_measurement_datagram(1, 4, [1]))     # two bytes more
+        self.assertEqual(asm.stats.scans_dropped_oversize, 1)
+        self.assertEqual(len(asm._pending), 0)
+
+    def test_resent_block_replaces_the_earlier_one(self):
+        asm = UdtAssembler()
+        asm.feed_datagram(make_status_datagram(1))
+        self.assertEqual(asm.feed_datagram(make_measurement_datagram(1, 0, [1] * 100, [1] * 100)), [])
+        scans = asm.feed_datagram(make_measurement_datagram(1, 0, [2] * 271, [1] * 271))    # same block, full size
+        self.assertEqual([(s.num_beams, s.complete, set(s.distances_mm)) for s in scans], [(271, True, {2})])
+        asm.feed_datagram(make_status_datagram(2))
+        asm.feed_datagram(make_measurement_datagram(2, 0, [3] * 200, [1] * 200))
+        asm.feed_datagram(make_measurement_datagram(2, 0, [3] * 100, [1] * 100))            # shrinks to 100 beams
+        self.assertEqual(asm.feed_datagram(make_measurement_datagram(2, 1, [4] * 100, [1] * 100)), [])  # 200, not 300
+        scans = asm.feed_datagram(make_measurement_datagram(2, 2, [5] * 71, [1] * 71))
+        self.assertEqual([(s.num_beams, s.complete) for s in scans], [(271, True)])
+
+    def test_missing_middle_block_is_incomplete_even_if_the_beam_count_matches(self):
+        asm = UdtAssembler(strict=False)
+        asm.feed_datagram(make_status_datagram(1))
+        asm.feed_datagram(make_measurement_datagram(1, 0, [1] * 135, [1] * 135))
+        scans = asm.feed_datagram(make_measurement_datagram(1, 2, [1] * 136, [1] * 136))    # 271 beams, block 1 missing
+        self.assertEqual([(s.num_beams, s.complete, s.blocks) for s in scans], [(271, False, (0, 2))])
+        strict = UdtAssembler()
+        strict.feed_datagram(make_status_datagram(1))
+        strict.feed_datagram(make_measurement_datagram(1, 0, [1] * 135, [1] * 135))
+        self.assertEqual(strict.feed_datagram(make_measurement_datagram(1, 2, [1] * 136, [1] * 136)), [])
+        self.assertEqual(strict.stats.scans_dropped_incomplete, 1)
+
+    def test_pending_limit_finishes_the_oldest_and_discards_a_stray(self):
+        with self.assertRaises(ValueError):
+            UdtAssembler(max_pending=0)
+        asm = UdtAssembler(strict=False, max_pending=1)
+        asm.feed_datagram(make_status_datagram(100))
+        asm.feed_datagram(make_measurement_datagram(100, 0, [1] * 100, [1] * 100))          # in flight
+        got = asm.feed_datagram(make_measurement_datagram(7000, 0, [9] * 100, [1] * 100))
+        self.assertEqual([(s.scan_number, s.complete) for s in got], [(100, False)])   # limit 1: the oldest is finished
+        self.assertEqual(sorted(asm._pending), [7000])
+        self.assertEqual(asm.stats.scans_incomplete, 1)
+        got = asm.feed_datagram(make_measurement_datagram(101, 0, [2] * 100, [1] * 100))
+        self.assertEqual(got, [])
+        self.assertEqual(sorted(asm._pending), [101])               # the stray is discarded, never emitted
+        self.assertEqual(asm.stats.scans_incomplete, 1)
+
+    def test_pending_limit_discards_the_stray_before_a_real_cycle(self):
+        asm = UdtAssembler(strict=False, max_pending=1)
+        asm.feed_datagram(make_status_datagram(100))                # cycle 100 announced, no data yet
+        self.assertEqual(asm.feed_datagram(make_measurement_datagram(7000, 0, [9] * 100, [1] * 100)), [])
+        self.assertEqual(sorted(asm._pending), [7000])
+        got = asm.feed_datagram(make_measurement_datagram(100, 0, [1] * 100, [1] * 100))    # needs the only slot
+        self.assertEqual(got, [])                                   # the stray is dropped, not emitted
+        self.assertEqual(sorted(asm._pending), [100])
+        self.assertEqual((asm.stats.scans_incomplete, asm.stats.scans_completed), (0, 0))
+
+    def test_unknown_profile_contour_that_turns_to_zero(self):
+        """Heuristic path: the contour found earlier becomes all zero (measurement switched off)."""
+        def status(number, contour):
+            block = bytearray(40)
+            block[0] = 77                                           # a profile type the specification does not know
+            block[24:32] = struct.pack("<HHHH", *contour, 0)
+            return make_frame(FRAME_SIZE + len(block), TELEGRAM_ID_STATUS, 0, number) + bytes(block)
+        asm = UdtAssembler()
+        asm.feed_datagram(status(1, (0, 100, 1)))
+        self.assertEqual((asm._contour_offset, asm.contour.num_beams), (24, 101))
+        asm.feed_datagram(status(2, (0, 0, 0)))
+        self.assertIsNone(asm.contour)
+        asm.feed_datagram(status(3, (0, 50, 1)))                    # and it is found again when it returns
+        self.assertEqual(asm.contour.num_beams, 51)
+
+    def test_bad_status_payloads_are_counted(self):
+        asm = UdtAssembler()
+        asm.feed_datagram(make_frame(FRAME_SIZE + 10, TELEGRAM_ID_STATUS, 0, 1) + rsl200_status_block(1)[:10])
+        self.assertEqual((asm.stats.bad_frames, asm.stats.status_received), (1, 0))
+        block = bytearray(rsl200_status_block(2))
+        block[28:36] = struct.pack("<HHHH", 500, 100, 1, 0)        # start > stop
+        asm.feed_datagram(make_frame(FRAME_SIZE + len(block), TELEGRAM_ID_STATUS, 0, 2) + bytes(block))
+        self.assertEqual((asm.stats.bad_frames, asm.stats.status_received), (2, 1))
+        self.assertIsNone(asm.contour)
+        truncated = make_measurement_datagram(2, 0, [1] * 271, [1] * 271)[:500]            # shorter than announced
+        self.assertEqual(asm.feed_datagram(truncated), [])
+        self.assertEqual(asm.stats.bad_frames, 3)
+        self.assertEqual(len(asm._pending), 0)
+
     def test_every_datagram_is_counted_exactly_once(self):
         """bad + unknown + stale + outlier + accepted == datagrams, over a messy stream."""
         asm = UdtAssembler()
@@ -1117,6 +1403,30 @@ class ScanViewTests(unittest.TestCase):
         scan = self.make_scan(contour=(0, 5, 5), values=[1500, 250])
         self.assertEqual(scan.distances_m, (1.5, 0.25))
         self.assertIs(scan.distances_m, scan.distances_m)
+
+    def test_beam_indices_of_incomplete_scans(self):
+        def lenient(blocks):
+            asm = UdtAssembler(strict=False)
+            asm.feed_datagram(make_status_datagram(1, contour=(0, 1350, 5)))               # 271 beams
+            scans = []
+            for block, count in blocks:
+                scans += asm.feed_datagram(make_measurement_datagram(1, block, [1] * count, [1] * count))
+            scans += asm.feed_datagram(make_status_datagram(2))
+            return scans[0]
+        lone_first = lenient([(0, 100)])
+        self.assertEqual((lone_first.complete, lone_first.beam_indices()[:3], lone_first.beam_indices()[-1]),
+                         (False, [0, 5, 10], 495))
+        lone_other = lenient([(1, 100)])                           # fragment size unknown: positions only
+        self.assertEqual(lone_other.beam_indices(), list(range(100)))
+        first_and_last = lenient([(0, 100), (2, 71)])
+        self.assertEqual(first_and_last.beam_indices()[100], 1000)  # block 2 starts at beam 200 -> index 1000
+        self.assertEqual(len(first_and_last.angles_deg()), 171)
+
+    def test_repr_is_short(self):
+        scan = self.make_scan()
+        self.assertEqual(repr(scan), "UdtScan(scan_number=1, beams=271, blocks=1, complete=True, "
+                                     "family=RSL200, telegram_id=3, status=yes)")
+        self.assertLess(len(repr(self.make_scan(family=ScannerFamily.RSL400, contour=(0, 2699, 1)))), 120)
 
     def test_scan_carries_wall_and_monotonic_receive_times(self):
         wall, mono = time.time(), time.monotonic()
