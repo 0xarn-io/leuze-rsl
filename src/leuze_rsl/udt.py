@@ -122,12 +122,13 @@ _PROFILE_LENGTH = {STATUS_PROFILE_TYPE_RSL200: 28, STATUS_PROFILE_TYPE_RSL400: 2
 CONTOUR_SIZE = 8
 _CONTOUR_STRUCT = struct.Struct("<HHHH")
 
-#: Distance value RSL 235 hardware sends for beams without any echo: 65535
-#: (0xFFFF, with a signal strength of 0xFFFF).  A second marker, 32767 (the
-#: top of the spec's RSL 200 range) with the weak signal strength actually
-#: received, marks echoes too weak to measure.  Both were observed on six
-#: units (captures of 2026-10-27) and both are rejected by
-#: :meth:`UdtScan.valid_mask`.
+#: Distance value RSL 235 hardware sends for beams without a measurement:
+#: 65535 (0xFFFF, together with a signal strength of 0xFFFF).  A second
+#: marker, 32767 (the top of the spec's RSL 200 range), comes with a real
+#: signal strength, mostly far below that of ordinary beams -- presumably an
+#: echo too weak to range (our reading; the specification defines neither).
+#: Both were observed on RSL 235 units (captures of 2026-10-27) and both are
+#: rejected by :meth:`UdtScan.valid_mask`.
 NO_ECHO_DISTANCE_MM = 65535
 
 
@@ -537,9 +538,9 @@ class UdtScan:
 
         0 mm, the no-echo value (65535, sent with a signal strength of
         65535) and anything above the family's distance range (RSL 200:
-        32767 mm, which RSL 235 hardware sends for echoes too weak to
-        measure; RSL 400: 65535 mm) count as invalid, as does anything
-        above ``max_valid_mm`` when given.
+        32767 mm, which RSL 235 hardware sends for beams it reports a
+        signal strength but no distance for; RSL 400: 65535 mm) count as
+        invalid, as does anything above ``max_valid_mm`` when given.
         """
         limit = self.geometry.max_valid_mm if max_valid_mm is None else max_valid_mm
         return [0 < d <= limit for d in self.distances_mm]
@@ -1197,7 +1198,13 @@ class RSL235Udt:
     # ------------------------------------------------------------------
 
     def get_scan(self, timeout: Optional[float] = None) -> UdtScan:
-        """Next complete scan.
+        """Next scan in order of arrival: the oldest one still buffered.
+
+        Blocks until a scan is available.  In strict mode (the default)
+        every scan is complete; with ``strict=False`` incomplete ones are
+        returned too.  A consumer slower than the scanner receives scans
+        that are up to ``scan_queue_size`` cycles old; see
+        :attr:`latest_scan` for the newest one.
 
         Raises :class:`ScanTimeoutError` (a ``TimeoutError``) if none arrives
         within ``timeout`` seconds, :class:`ReceiverStoppedError` if the
