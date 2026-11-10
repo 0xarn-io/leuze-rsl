@@ -178,6 +178,25 @@ class UdtStatusDatagramTests(unittest.TestCase):
         self.assertEqual(profile[12:16], b"\0\0\0\0")
         self.assertEqual(profile[20:28], b"\0" * 8)
 
+    def test_contamination_warning_knob_and_hardware_like_bytes(self):
+        """The RSL 200 profile mirrors captured hardware: byte 5 = 0x87, CLEAR follows the OSSD, warning bits together."""
+        sim = UdtSimulator(contamination_warning=True)
+        block = sim.status_block(7)
+        self.assertEqual((block[2], block[3], block[5]), (0x62, 0xF4, 0x87))
+        status = StatusProfile.from_bytes(block)
+        self.assertTrue(status.warning and status.screen_contaminated and status.screen_warning)
+        self.assertFalse(status.screen_error or status.error)
+        self.assertEqual((status.ossd_a, status.ossd_clear, status.event_log), (True, True, True))
+        sim.contamination_warning = False
+        sim.ossd = False
+        status = StatusProfile.from_bytes(sim.status_block(8))
+        self.assertFalse(status.warning or status.screen_warning)
+        self.assertEqual((status.ossd_a, status.ossd_clear), (False, False))
+        rsl400 = StatusProfile.from_bytes(UdtSimulator(family=ScannerFamily.RSL400,
+                                                       contamination_warning=True).status_block(1))
+        self.assertTrue(rsl400.alarm and rsl400.screen_contaminated)
+        self.assertEqual((rsl400.ossd_clear, rsl400.event_log), (None, None))
+
     def test_status_knobs_drive_the_flags(self):
         sim = UdtSimulator(ossd=False, protective_field_free=False,
                            warning_field_free=False, error=True)

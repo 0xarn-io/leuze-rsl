@@ -279,6 +279,19 @@ class StatusProfile:
     b_field_pair: Optional[int]
     configuration_signature: Optional[bytes]  #: 8-byte signature trailer, when transmitted
     raw: bytes                            #: complete data block (status + contour + trailer)
+    # -- RSL 200, added in 0.5.0 (defaulted so existing constructor calls keep working) --
+    ossd_clear: Optional[bool] = None     #: CLEAR, "internal signal OSSD" (table 3.3, byte 3 bit 2)
+    event_log: Optional[bool] = None      #: SSREC, "EventLog" active (table 3.3, byte 5 bit 0)
+
+    @property
+    def warning(self) -> bool:
+        """Collective warning without switch-off; alias of :attr:`alarm`.
+
+        The RSL 200 table names this bit WARNING, the RSL 400 table ALARM.
+        On an RSL 200 it is set together with :attr:`screen_warning` while
+        the optics cover is contaminated.
+        """
+        return self.alarm
 
     @property
     def supply_voltage_v(self) -> Optional[float]:
@@ -343,6 +356,7 @@ class StatusProfile:
                 warning_field_2_violated=not (b3 & 0x10),
                 restart_interlock=bool(b3 & 0x08),
                 field_triple=data[4], inputs=data[6], outputs=data[7],
+                ossd_clear=bool(b3 & 0x04), event_log=bool(data[5] & 0x01),
                 supply_voltage_raw=voltage,
                 temperature_c=temperature / 10.0,         # [0.1 degC]
                 signature=signature, error_class=data[24], error_number=error_number,
@@ -474,7 +488,8 @@ class UdtScan:
     contour: Optional[MeasurementContour]     #: beam geometry, if known
     status: Optional[StatusProfile]           #: status profile of this scan cycle (None if its telegram was lost)
     family: Optional[ScannerFamily]           #: device family, once a status telegram was seen
-    received_at: float                        #: host time.time() of completion
+    received_at: float                        #: host time.time() of completion (wall clock: can jump)
+    received_monotonic: float = 0.0           #: host time.monotonic() of completion (0.0 if not set)
 
     @property
     def num_beams(self) -> int:
@@ -495,6 +510,15 @@ class UdtScan:
     def no_echo_mm(self) -> int:
         """Distance value this device reports for beams without a valid echo."""
         return self.geometry.no_echo_mm
+
+    def age_s(self) -> float:
+        """Seconds since this scan was completed on this host.
+
+        Measured on the monotonic clock (:attr:`received_monotonic`), so it
+        is immune to wall-clock adjustments; use it to reject stale data.
+        Only meaningful for scans produced by a receiver in this process.
+        """
+        return time.monotonic() - self.received_monotonic
 
     @cached_property
     def distances_m(self) -> Tuple[float, ...]:
@@ -590,7 +614,7 @@ class UdtStats:
     scans_dropped_incomplete: int = 0  #: scans dropped (missing blocks / no contour) in strict mode
     scans_incomplete: int = 0          #: incomplete scans emitted (strict=False)
     scans_dropped_oversize: int = 0    #: scans discarded for exceeding the fragment/byte bounds
-    stale_datagrams: int = 0           #: datagrams of an already finished scan (late/duplicate)
+    stale_datagrams: int = 0           #: late/duplicated datagrams: data of a finished scan, or a status older than the one held
     outlier_datagrams: int = 0         #: datagrams far ahead of the stream, awaiting confirmation
     sequence_resets: int = 0           #: scan counter jumped backwards (scanner restarted)
     sequence_jumps: int = 0            #: scan counter jumped forwards (receiver offline / cycles lost)
@@ -699,6 +723,9 @@ class UdtAssembler:
             # status/contour of *its* cycle before adopting the new ones.
             tracked = self._track_sequence(frame.scan_number, status=True)
             if tracked is None:
+                # A late or duplicated status of a cycle older than the one
+                # already adopted: it must not turn back latest_status.
+                self.stats.stale_datagrams += 1
                 return []
             advance, scans = tracked
             if not advance:
@@ -719,13 +746,17 @@ class UdtAssembler:
                         ) -> Optional[Tuple[bool, List[UdtScan]]]:
         """Classify ``scan_number`` against the stream position.
 
-        Returns ``None`` for a late/duplicated measurement datagram of a
-        finished scan (a scan number at or close behind the newest one);
-        status telegrams are never stale (a device may send them after the
-        data).  Otherwise returns ``(advance, flushed)``: ``advance`` is False
+        Returns ``None`` for a late/duplicated datagram: a measurement
+        datagram of a finished scan (a scan number at or close behind the
+        newest one), or a status telegram older than the status already
+        adopted.  A status telegram of the current cycle is never stale (a
+        device may send it after the data), and neither is one that is newer
+        than the adopted status.  Otherwise returns ``(advance, flushed)``: ``advance`` is False
         for a datagram far ahead of the stream that is not yet confirmed by a
         second one (see :data:`_FORWARD_WINDOW`), so callers must not
-        finalize older scans or adopt its status for it.  An older scan
+        finalize older scans, adopt its status or emit its scan for it; its
+        data is kept until the stream confirms it and discarded if the
+        stream goes on without it.  An older scan
         number arriving after a pause of :data:`_RESTART_GAP_S`, or more than
         :data:`_STALE_WINDOW` cycles back, means the scanner's counter
         restarted: pending scans are finalized and returned in ``flushed``
@@ -746,6 +777,10 @@ class UdtAssembler:
                 or (_scan_newer(scan_number, candidate)
                     and ((scan_number - candidate) & 0xFFFFFFFF) <= _FORWARD_WINDOW))
             if ahead <= _FORWARD_WINDOW or confirmed:
+                if candidate is not None and not confirmed:
+                    # The stream went on without the far-ahead number: it
+                    # was a stray, and whatever it carried is discarded.
+                    self._pending.pop(candidate, None)
                 self.stats.cycles_missed += ahead - 1
                 if ahead > _FORWARD_WINDOW:
                     self.stats.sequence_jumps += 1
@@ -755,6 +790,8 @@ class UdtAssembler:
                 self._candidate = None
                 self._last_activity = now
                 return True, []
+            if candidate is not None and candidate != scan_number:
+                self._pending.pop(candidate, None)    # superseded by another unconfirmed number
             self._candidate = scan_number
             self.stats.outlier_datagrams += 1
             return False, []
@@ -765,7 +802,10 @@ class UdtAssembler:
             return None                       # late fragment of the finished current cycle
         if (last_activity is not None and now - last_activity < _RESTART_GAP_S
                 and ((newest - scan_number) & 0xFFFFFFFF) <= _STALE_WINDOW):
-            return (True, []) if status else None
+            if status and (self._status_scan_number is None
+                           or _scan_newer(scan_number, self._status_scan_number)):
+                return True, []               # late, but newer than the status we hold
+            return None
         self._last_activity = now
         self.stats.sequence_resets += 1
         if self.stats.sequence_resets <= 3:
@@ -774,6 +814,8 @@ class UdtAssembler:
         else:
             log.debug("scan counter went back from %d to %d", newest, scan_number)
         flushed: List[UdtScan] = []
+        if self._candidate is not None:
+            self._pending.pop(self._candidate, None)  # never emit an unconfirmed far-ahead cycle
         for number in list(self._pending):
             scan = self._build(number, self._pending.pop(number))
             if scan is not None:
@@ -781,6 +823,7 @@ class UdtAssembler:
         self._last_finished = None
         self._newest_seen = scan_number
         self._candidate = None
+        self._status_scan_number = None       # the held status belongs to the previous run
         return True, flushed
 
     def _handle_status(self, scan_number: int, payload: bytes) -> None:
@@ -850,13 +893,17 @@ class UdtAssembler:
         pending = self._pending.get(frame.scan_number)
         if pending is None:
             if len(self._pending) >= self.max_pending:
-                # Make room: drop an unconfirmed outlier first, else the oldest.
+                # Make room: the unconfirmed far-ahead cycle goes first (it
+                # is discarded, never emitted), else the oldest is finished.
                 outliers = [n for n in self._pending
                             if self._newest_seen is not None and _scan_newer(n, self._newest_seen)]
-                victim = outliers[-1] if outliers else next(iter(self._pending))
-                scan = self._build(victim, self._pending.pop(victim))
-                if scan is not None:
-                    scans.append(scan)
+                if outliers:
+                    del self._pending[outliers[-1]]
+                else:
+                    victim = next(iter(self._pending))
+                    scan = self._build(victim, self._pending.pop(victim))
+                    if scan is not None:
+                        scans.append(scan)
             # The status telegram of this cycle carries the same frame scan
             # number; anything else is an older cycle's (this one's was lost).
             status = self.latest_status if self._status_scan_number == frame.scan_number else None
@@ -875,13 +922,16 @@ class UdtAssembler:
                 or pending.nbytes > _MAX_BYTES_PER_SCAN):
             del self._pending[frame.scan_number]
             self.stats.scans_dropped_oversize += 1
-            self._mark_finished(frame.scan_number)
+            if advance:
+                self._mark_finished(frame.scan_number)
             log.debug("dropping oversize scan %d (%d fragments, %d bytes)",
                       frame.scan_number, len(pending.fragments), pending.nbytes)
             return scans
 
         # Early completion: all beams announced by the contour have arrived.
-        if pending.contour is not None:
+        # A far-ahead cycle that is not confirmed yet is only kept: it is
+        # emitted once a later datagram shows that the stream really is there.
+        if pending.contour is not None and advance:
             if pending.nbytes // per_beam >= pending.contour.num_beams:
                 del self._pending[frame.scan_number]
                 scan = self._build(frame.scan_number, pending)
@@ -954,6 +1004,7 @@ class UdtAssembler:
             status=status,
             family=pending.family if pending.family is not None else self.family,
             received_at=time.time(),
+            received_monotonic=time.monotonic(),
         )
 
 
@@ -984,7 +1035,11 @@ class RSL235Udt:
     bind_address:
         Local interface to bind ("" = all).
     source_ip:
-        If set, datagrams from any other IP are ignored.
+        If set, datagrams from any other IP are ignored.  Without it the
+        receiver follows the first scanner whose telegrams arrive and
+        ignores telegrams of any *other* sender for as long as that scanner
+        keeps sending (see :attr:`source_address`): two scanners pushing to
+        one port must never be merged into one stream.
     strict:
         Drop scans with missing fragments (default) instead of emitting them
         with ``complete=False``.
@@ -999,6 +1054,14 @@ class RSL235Udt:
 
     The receiver is restartable; scans buffered before :meth:`stop` are
     discarded by the next :meth:`start`.
+
+    :meth:`get_scan` hands out scans in order of arrival, so a consumer
+    slower than the scanner works through a backlog of up to
+    ``scan_queue_size`` scans; use :attr:`latest_scan` when only the newest
+    scan matters, and :meth:`UdtScan.age_s` to reject stale data.
+
+    This class reads the *measurement and status data* of a safety device.
+    It is not a safety function and must not be used to implement one.
     """
 
     def __init__(self,
@@ -1030,6 +1093,9 @@ class RSL235Udt:
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._last_rx: Optional[float] = None
+        self._latest_scan: Optional[UdtScan] = None
+        self._source: Optional[str] = None           # sender whose stream is being followed
+        self._foreign_reported: List[str] = []       # other senders already logged
         self.scans_dropped_queue = 0
         self.foreign_datagrams_dropped = 0
         self.receiver_errors = 0
@@ -1070,6 +1136,9 @@ class RSL235Udt:
             self._drain_queue()
             self._assembler = UdtAssembler(strict=self.strict)
             self._last_rx = None
+            self._latest_scan = None
+            self._source = None
+            self._foreign_reported = []
             self._sock = sock
             self._running = True
             self._thread = threading.Thread(target=self._rx_loop, args=(sock,),
@@ -1155,7 +1224,39 @@ class RSL235Udt:
                 return
 
     @property
+    def scans_available(self) -> int:
+        """Scans currently buffered for :meth:`get_scan`."""
+        with self._scan_queue.mutex:
+            return sum(1 for item in self._scan_queue.queue if not isinstance(item, _Wakeup))
+
+    @property
+    def latest_scan(self) -> Optional[UdtScan]:
+        """The newest scan of this session, or ``None`` before the first one.
+
+        Never blocks and never returns backlog, unlike :meth:`get_scan`:
+        the right call for a consumer that polls slower than the scanner
+        sends.  The same scan is returned until a newer one arrives --
+        compare :attr:`UdtScan.scan_number`, or check
+        :meth:`UdtScan.age_s` to detect a scanner that stopped sending.
+        Reset by :meth:`start`; after :meth:`stop` the last scan stays
+        readable.
+        """
+        return self._latest_scan
+
+    @property
+    def source_address(self) -> Optional[str]:
+        """IP address of the scanner whose telegrams this receiver follows.
+
+        ``None`` until the first valid telegram arrives.  Telegrams of other
+        senders are ignored (and counted in ``stats["foreign_datagrams_dropped"]``)
+        while this scanner keeps sending; once it has been silent for
+        ``data_timeout`` seconds another sender may take over.
+        """
+        return self._source
+
+    @property
     def latest_status(self) -> Optional[StatusProfile]:
+        """The newest status profile received (also when no measurement data is sent)."""
         return self._assembler.latest_status
 
     @property
@@ -1196,15 +1297,7 @@ class RSL235Udt:
                     if self._running and self._sock is sock:
                         failure = exc
                     break
-                if self.source_ip is not None and addr[0] != self.source_ip:
-                    self.foreign_datagrams_dropped += 1
-                    continue
-                try:
-                    self._process(data, still_current)
-                except Exception:
-                    # Never let a bug in a callback or a parser kill the receiver.
-                    self.receiver_errors += 1
-                    log.exception("error while processing a datagram")
+                self._handle_datagram(data, addr[0], still_current)
         finally:
             if failure is not None:
                 log.error("UDP receiver on port %d failed: %s", self.port, failure)
@@ -1216,13 +1309,50 @@ class RSL235Udt:
                 self._wake_waiters(ScannerConnectionError(
                     "UDP receiver on port %d failed: %s" % (self.port, failure)))
 
-    def _process(self, data: bytes, still_current: Callable[[], bool]) -> None:
+    def _handle_datagram(self, data: bytes, sender: str,
+                         still_current: Callable[[], bool]) -> None:
+        if not self._accept_sender(sender):
+            self.foreign_datagrams_dropped += 1
+            return
+        try:
+            self._process(data, sender, still_current)
+        except Exception:
+            # Never let a bug in a callback or a parser kill the receiver.
+            self.receiver_errors += 1
+            log.exception("error while processing a datagram")
+
+    def _accept_sender(self, sender: str) -> bool:
+        """Whether a datagram from ``sender`` belongs to the stream being followed."""
+        if self.source_ip is not None:
+            return sender == self.source_ip
+        followed = self._source
+        if followed is None or sender == followed:
+            return True
+        last_rx = self._last_rx
+        if last_rx is None or time.monotonic() - last_rx >= self.data_timeout:
+            return True         # the followed scanner went silent: another one may take over
+        # A second sender while the first is alive: two scanners were given
+        # the same destination port.  Their scan counters and contours are
+        # unrelated; feeding both to one assembler would interleave them.
+        if sender not in self._foreign_reported and len(self._foreign_reported) < 8:
+            self._foreign_reported.append(sender)
+            log.warning("UDP port %d: ignoring data telegrams from %s, already receiving from %s "
+                        "-- give every scanner its own destination port (or pass source_ip)",
+                        self.port, sender, followed)
+        return False
+
+    def _process(self, data: bytes, sender: str, still_current: Callable[[], bool]) -> None:
         assembler = self._assembler
         had_status = assembler.stats.status_received
         rejected = assembler.stats.bad_frames + assembler.stats.unknown_ids
         scans = assembler.feed_datagram(data)
         if assembler.stats.bad_frames + assembler.stats.unknown_ids == rejected:
             self._last_rx = time.monotonic()     # only genuine telegrams count
+            if sender != self._source:
+                if self._source is not None:
+                    log.warning("UDP port %d: data telegrams now come from %s (previously %s)",
+                                self.port, sender, self._source)
+                self._source = sender
         for scan in scans:
             self._deliver(scan, still_current)
         if (self.on_status is not None
@@ -1241,6 +1371,7 @@ class RSL235Udt:
                 log.exception("on_scan callback raised")
         if not still_current():
             return          # stopped/restarted while the callback ran: old session's scan
+        self._latest_scan = scan
         try:
             self._scan_queue.put_nowait(scan)
         except queue.Full:

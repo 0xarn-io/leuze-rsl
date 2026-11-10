@@ -22,11 +22,29 @@ import sys
 from typing import Any, List, Optional
 
 from .errors import RSL235Error
-from .udt import DEFAULT_UDT_PORT, RSL235Udt
+from .udt import DEFAULT_UDT_PORT, RSL235Udt, StatusProfile
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_INTERRUPTED = 130
+
+
+def _describe_status(status: StatusProfile) -> List[str]:
+    """The status summary printed after the scans (one line, plus device messages)."""
+    line = ("status: family=%s mode=%d error=%s warning=%s ossd=%s protective_field_violated=%s"
+            % (status.family.name if status.family is not None else "unknown",
+               status.operating_mode, status.error, status.warning, status.ossd_a,
+               status.a_protective_violated))
+    if status.supply_voltage_v is not None and status.temperature_c is not None:
+        line += "  supply=%.1f V  temperature=%.1f degC" % (
+            status.supply_voltage_v, status.temperature_c)
+    lines = [line]
+    if status.screen_error:
+        lines.append("device reports: optics cover contamination ERROR (OSSDs switched off)")
+    elif status.screen_warning or status.screen_contaminated:
+        lines.append("device reports: optics cover contamination warning -- clean the optics "
+                     "cover and check for objects right in front of it")
+    return lines
 
 
 def _run_udt(args: argparse.Namespace) -> int:
@@ -55,14 +73,8 @@ def _run_udt(args: argparse.Namespace) -> int:
             print(line)
         status = receiver.latest_status
         if status is not None:
-            line = ("status: family=%s mode=%d error=%s ossd=%s protective_field_violated=%s"
-                    % (status.family.name if status.family is not None else "unknown",
-                       status.operating_mode, status.error, status.ossd_a,
-                       status.a_protective_violated))
-            if status.supply_voltage_v is not None and status.temperature_c is not None:
-                line += "  supply=%.1f V  temperature=%.1f degC" % (
-                    status.supply_voltage_v, status.temperature_c)
-            print(line)
+            for line in _describe_status(status):
+                print(line)
         contour = receiver.contour
         if contour is not None:
             print("contour: indices %d..%d step %d -> %d beams"

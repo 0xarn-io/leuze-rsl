@@ -8,6 +8,8 @@ import unittest
 from unittest import mock
 
 from leuze_rsl import __main__ as cli
+from leuze_rsl.simulator import UdtSimulator
+from leuze_rsl.udt import FRAME_SIZE, ScannerFamily, StatusProfile
 
 
 def free_udp_port() -> int:
@@ -76,6 +78,23 @@ class CliTests(unittest.TestCase):
                 code, _, err = self.run_cli(argv)
                 self.assertEqual(code, 130)
                 self.assertEqual(err, "interrupted\n")
+
+    def test_status_summary_reports_device_warnings(self):
+        # status datagram captured from an RSL 235 whose optics cover warning is active
+        real = bytes.fromhex("3800000008000600040b01320100000066130500150162f401870000ec005b0100000000"
+                             "66130500be302bd649ea04000000460505000000")
+        lines = cli._describe_status(StatusProfile.from_bytes(real[FRAME_SIZE:]))
+        self.assertEqual(lines[0], "status: family=RSL200 mode=1 error=False warning=True ossd=True "
+                                   "protective_field_violated=False  supply=23.6 V  temperature=34.7 degC")
+        self.assertEqual(len(lines), 2)
+        self.assertIn("optics cover contamination warning", lines[1])
+        for family in (ScannerFamily.RSL200, ScannerFamily.RSL400):
+            sim = UdtSimulator(family=family, contamination_warning=True)
+            lines = cli._describe_status(StatusProfile.from_bytes(sim.status_block(1)))
+            self.assertIn("warning=True", lines[0])
+            self.assertIn("contamination warning", lines[1])
+            clean = UdtSimulator(family=family)
+            self.assertEqual(len(cli._describe_status(StatusProfile.from_bytes(clean.status_block(1)))), 1)
 
     def test_port_in_use_is_reported(self):
         blocker = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

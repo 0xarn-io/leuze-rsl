@@ -772,7 +772,9 @@ class UdtSimulator:
     **Status knobs** (plain attributes, read for every status datagram, so
     they can be changed while running): ``ossd``, ``protective_field_free``,
     ``warning_field_free`` (RSL 200: warning fields 1 and 2), ``error`` (the
-    collective ERROR bit), ``signature`` (RSL 400 only: the 8-byte
+    collective ERROR bit), ``contamination_warning`` (optics cover warning:
+    the collective warning bit plus the contamination bits, set together as
+    on RSL 235 hardware), ``signature`` (RSL 400 only: the 8-byte
     configuration signature, sent as the 12-byte trailer).
 
     **Environment knobs** (read at :meth:`start`): a rectangular room
@@ -821,6 +823,7 @@ class UdtSimulator:
                  protective_field_free: bool = True,
                  warning_field_free: bool = True,
                  error: bool = False,
+                 contamination_warning: bool = False,
                  signature: Optional[bytes] = None,
                  profile_type: Optional[int] = None,
                  contour_offset: Optional[int] = None,
@@ -887,6 +890,7 @@ class UdtSimulator:
         self.protective_field_free = protective_field_free
         self.warning_field_free = warning_field_free
         self.error = error
+        self.contamination_warning = contamination_warning
         self.signature = signature
         self.profile_type = profile_type
         self.contour_offset = contour_offset
@@ -996,11 +1000,14 @@ class UdtSimulator:
         p = bytearray(28)
         p[0] = STATUS_PROFILE_TYPE_RSL200
         p[1] = 1                                                   # OP-MODE: safety mode
-        p[2] = 0x80 if self.error else 0                           # ERROR
+        p[2] = ((0x80 if self.error else 0)                        # ERROR
+                | (0x62 if self.contamination_warning else 0))     # WARNING + SCREEN + SCREEN_WARNING
         p[3] = ((0x80 if self.ossd else 0)                         # OSSD on
                 | (0x40 if self.protective_field_free else 0)      # PF_VIO: 1 = free
-                | (0x30 if self.warning_field_free else 0))        # WF_VIO_1/2: 1 = free
+                | (0x30 if self.warning_field_free else 0)         # WF_VIO_1/2: 1 = free
+                | (0x04 if self.ossd else 0))                      # CLEAR: follows the OSSD on hardware
         p[4] = 1                                                   # TRIPLE_SEL
+        p[5] = 0x87                                                # SSREC + undocumented bits, as captured
         struct.pack_into("<HH", p, 8, self.SUPPLY_VOLTAGE_RAW, self.TEMPERATURE_RAW)
         struct.pack_into("<I", p, 16, scan_number & 0xFFFFFFFF)   # SCAN_NUM
         # bytes 20..27: SAFE_SIG, ERR_CLASS, ERR_NUM, reserved = 0
@@ -1011,7 +1018,8 @@ class UdtSimulator:
         p = bytearray(20)
         p[0] = STATUS_PROFILE_TYPE_RSL400
         p[1] = 1                                                   # OP-MODE: safety mode
-        p[2] = (0x80 if self.error else 0) | (0x02 if self.ossd else 0)   # ERROR, A-OSSD
+        p[2] = ((0x80 if self.error else 0) | (0x02 if self.ossd else 0)   # ERROR, A-OSSD
+                | (0x60 if self.contamination_warning else 0))             # ALARM + SCREEN
         struct.pack_into("<I", p, 8, scan_number & 0xFFFFFFFF)    # Scan
         p[12] = (0x80                                              # A-ACTIVE
                  | (0x40 if self.warning_field_free else 0)        # A-WF-VIO: 1 = free

@@ -188,6 +188,13 @@ RSL235_CAPTURE_FAR_MEASUREMENT = bytes.fromhex(
     "ac160e022c163a027515250211132e01df112a0179107a02"
 )
 
+#: Status datagram of a third RSL 235 unit (scan 332646) whose optics cover
+#: warning is active: byte 2 = 0x62 (WARNING + SCREEN + SCREEN_WARNING).
+RSL235_CAPTURE_WARNING_STATUS = bytes.fromhex(
+    "3800000008000600040b01320100000066130500150162f401870000ec005b0100000000"
+    "66130500be302bd649ea04000000460505000000"
+)
+
 
 class Rsl235CaptureTests(unittest.TestCase):
     """Byte-exact decoding of one cycle captured from real RSL 235 hardware."""
@@ -274,6 +281,24 @@ class Rsl235CaptureTests(unittest.TestCase):
         self.assertEqual(sum(mask), 264)
         self.assertEqual(scan.distances_mm[36:38], (4459, 4446))
         self.assertEqual(len(scan.to_cartesian()), 264)
+
+    def test_optics_cover_warning_and_remaining_table_bits(self):
+        """WARNING, SCREEN and SCREEN_WARNING come together on hardware; CLEAR and SSREC are decoded."""
+        warn = StatusProfile.from_bytes(RSL235_CAPTURE_WARNING_STATUS[FRAME_SIZE:])
+        self.assertEqual(warn.scan_number, 332646)
+        self.assertTrue(warn.alarm and warn.warning and warn.screen_contaminated and warn.screen_warning)
+        self.assertFalse(warn.screen_error or warn.error)
+        self.assertTrue(warn.ossd_a)                                 # a warning does not switch off
+        self.assertEqual((warn.ossd_clear, warn.event_log), (True, True))
+        self.assertEqual((warn.error_class, warn.error_number), (73, 1258))
+        clean = StatusProfile.from_bytes(RSL235_CAPTURE_FAR_STATUS[FRAME_SIZE:])
+        self.assertFalse(clean.alarm or clean.warning or clean.screen_contaminated or clean.screen_warning)
+        self.assertEqual((clean.ossd_clear, clean.event_log), (True, True))
+        bench = StatusProfile.from_bytes(RSL235_CAPTURE_STATUS[FRAME_SIZE:])   # unconfigured, OSSDs off
+        self.assertEqual((bench.ossd_clear, bench.event_log), (False, False))
+        rsl400 = StatusProfile.from_bytes(RSL400_CAPTURE[FRAME_SIZE:])
+        self.assertEqual((rsl400.ossd_clear, rsl400.event_log), (None, None))
+        self.assertEqual(rsl400.warning, rsl400.alarm)
 
 
 class FrameTests(unittest.TestCase):
@@ -439,6 +464,106 @@ class StatusProfileRsl400Tests(unittest.TestCase):
         self.assertTrue(status.error)
         self.assertTrue(status.alarm)
         self.assertFalse(status.ossd_a)
+
+
+class SpecTableBitWalkTests(unittest.TestCase):
+    """Flip every single bit of both status profiles and check exactly which attribute changes.
+
+    The tables below are written from the specification (tables 3.3 and 3.5),
+    not from the decoder: (byte, mask) -> (attribute, value when the bit is 1).
+    Any wrong mask, offset, polarity or width in the decoder fails here.
+    """
+
+    RSL200_BITS = {
+        (2, 0x80): ("error", True), (2, 0x40): ("alarm", True), (2, 0x20): ("screen_contaminated", True),
+        (2, 0x10): ("edm_error", True), (2, 0x08): ("field_selection_error", True),
+        (2, 0x04): ("screen_error", True), (2, 0x02): ("screen_warning", True),
+        (3, 0x80): ("ossd_a", True), (3, 0x40): ("a_protective_violated", False),
+        (3, 0x20): ("a_warning_violated", False), (3, 0x10): ("warning_field_2_violated", False),
+        (3, 0x08): ("restart_interlock", True), (3, 0x04): ("ossd_clear", True), (3, 0x02): ("parked", True),
+        (5, 0x01): ("event_log", True),
+    }
+    #: little-endian numeric fields: first byte -> (attribute, width in bytes, scale)
+    RSL200_NUMBERS = {1: ("operating_mode", 1, 1), 4: ("field_triple", 1, 1), 6: ("inputs", 1, 1),
+                      7: ("outputs", 1, 1), 8: ("supply_voltage_raw", 2, 1), 10: ("temperature_c", 2, 0.1),
+                      16: ("scan_number", 4, 1), 20: ("signature", 4, 1), 24: ("error_class", 1, 1),
+                      25: ("error_number", 2, 1)}
+    RSL400_BITS = {
+        (2, 0x80): ("error", True), (2, 0x40): ("alarm", True), (2, 0x20): ("screen_contaminated", True),
+        (2, 0x10): ("edm_error", True), (2, 0x08): ("field_selection_error", True),
+        (2, 0x04): ("estop_error", True), (2, 0x02): ("ossd_a", True), (2, 0x01): ("ossd_b", True),
+        (3, 0x80): ("estop_active", True), (3, 0x40): ("parked", True),
+        # base profile below has both functions active with both fields free (bits set)
+        (12, 0x80): ("a_active", True), (12, 0x40): ("a_warning_violated", False),
+        (12, 0x20): ("a_protective_violated", False),
+        (16, 0x80): ("b_active", True), (16, 0x40): ("b_warning_violated", False),
+        (16, 0x20): ("b_protective_violated", False),
+    }
+    RSL400_NUMBERS = {1: ("operating_mode", 1, 1), 8: ("scan_number", 4, 1)}
+    RSL400_NIBBLES = {13: ("a_bank", "a_field_pair"), 17: ("b_bank", "b_field_pair")}
+
+    @staticmethod
+    def fields(status):
+        values = dict(vars(status))
+        del values["raw"]
+        return values
+
+    def walk(self, base, length, bits, numbers, nibbles=()):
+        base_fields = self.fields(StatusProfile.from_bytes(bytes(base)))
+        number_bytes = {first + i: (first, spec) for first, spec in numbers.items() for i in range(spec[1])}
+        checked = 0
+        for byte in range(1, length):
+            for bit in range(8):
+                mask = 1 << bit
+                data = bytearray(base)
+                data[byte] ^= mask
+                now_set = bool(data[byte] & mask)
+                got = self.fields(StatusProfile.from_bytes(bytes(data)))
+                changed = {k: v for k, v in got.items() if v != base_fields[k]}
+                where = "byte %d bit %d" % (byte, bit)
+                if (byte, mask) in bits:
+                    attribute, when_set = bits[(byte, mask)]
+                    self.assertEqual(changed, {attribute: when_set if now_set else not when_set}, where)
+                elif byte in number_bytes:
+                    first, (attribute, width, scale) = number_bytes[byte]
+                    raw = int.from_bytes(data[first:first + width], "little")
+                    self.assertEqual(list(changed), [attribute], where)
+                    self.assertAlmostEqual(changed[attribute], raw * scale, places=6, msg=where)
+                elif byte in nibbles:
+                    high, low = nibbles[byte]
+                    self.assertEqual(changed, {high: data[byte] >> 4} if mask >= 0x10
+                                     else {low: data[byte] & 0x0F}, where)
+                else:
+                    self.assertEqual(changed, {}, where + " is reserved or not decoded")
+                checked += 1
+        return checked
+
+    def test_rsl200_table_3_3(self):
+        base = bytearray(28 + 8)
+        base[0] = 21
+        base[28:36] = struct.pack("<HHHH", 0, 1350, 5, 0)
+        self.assertEqual(self.walk(base, 28, self.RSL200_BITS, self.RSL200_NUMBERS), 27 * 8)
+
+    def test_rsl400_table_3_5(self):
+        base = bytearray(20 + 8)
+        base[0] = 1
+        base[12] = base[16] = 0xE0                                # A and B active, warning and protective field free
+        base[20:28] = struct.pack("<HHHH", 0, 2699, 1, 0)
+        checked = self.walk(base, 20, self.RSL400_BITS, self.RSL400_NUMBERS, self.RSL400_NIBBLES)
+        self.assertEqual(checked, 19 * 8)
+
+    def test_rsl400_field_flags_are_reported_only_while_the_function_is_active(self):
+        base = bytearray(20 + 8)
+        base[0] = 1                                               # A and B inactive, field bits 0 ("violation")
+        status = StatusProfile.from_bytes(bytes(base))
+        self.assertEqual((status.a_active, status.a_protective_violated, status.a_warning_violated),
+                         (False, False, False))
+        self.assertEqual((status.b_active, status.b_protective_violated, status.b_warning_violated),
+                         (False, False, False))
+        base[12] = 0x80                                           # A active, both field bits 0
+        status = StatusProfile.from_bytes(bytes(base))
+        self.assertEqual((status.a_protective_violated, status.a_warning_violated), (True, True))
+        self.assertEqual((status.b_protective_violated, status.b_warning_violated), (False, False))
 
 
 class ContourTests(unittest.TestCase):
@@ -659,9 +784,10 @@ class AssemblerTests(unittest.TestCase):
         self.assertEqual(len(asm.feed_datagram(datagram)), 1)
         self.assertEqual(asm.feed_datagram(datagram), [])                   # duplicate
         self.assertEqual(asm.feed_datagram(make_measurement_datagram(9, 0, [1] * 271, [1] * 271)), [])
-        self.assertEqual(asm.feed_datagram(make_status_datagram(9)), [])    # late status: accepted, harmless
-        self.assertEqual(asm.stats.stale_datagrams, 2)
+        self.assertEqual(asm.feed_datagram(make_status_datagram(9)), [])    # late status of an older cycle
+        self.assertEqual(asm.stats.stale_datagrams, 3)
         self.assertEqual(asm.stats.scans_completed, 1)
+        self.assertEqual(asm.latest_status.scan_number, 10)                 # never turned back
 
     def test_status_after_data_every_cycle(self):
         """Status telegrams are never 'stale', so a status-after-data device keeps working."""
@@ -747,6 +873,118 @@ class AssemblerTests(unittest.TestCase):
         self.assertEqual(asm.stats.cycles_missed, 498)
         self.assertIsNone(got[0].status)                          # its status arrived unconfirmed
         self.assertEqual(got[1].status.scan_number, 501)
+
+    def test_unconfirmed_far_ahead_scan_is_never_emitted(self):
+        """A complete stray cycle far ahead is not a scan and must not disable duplicate protection (regression)."""
+        asm = UdtAssembler()
+        got = asm.feed_datagram(make_status_datagram(100))
+        got += asm.feed_datagram(make_measurement_datagram(100, 0, [1] * 271, [1] * 271))
+        got += asm.feed_datagram(make_measurement_datagram(1100, 0, [9] * 271, [1] * 271))   # complete, far ahead
+        got += asm.feed_datagram(make_status_datagram(101))
+        datagram = make_measurement_datagram(101, 0, [2] * 271, [1] * 271)
+        got += asm.feed_datagram(datagram)
+        got += asm.feed_datagram(datagram)                                                # duplicate of cycle 101
+        self.assertEqual([s.scan_number for s in got], [100, 101])
+        self.assertEqual(asm.stats.outlier_datagrams, 1)
+        self.assertEqual(asm.stats.stale_datagrams, 1)
+        self.assertEqual(len(asm._pending), 0)                    # the stray's data was discarded
+
+    def test_duplicated_far_ahead_datagram_yields_one_scan(self):
+        """Found by model checking: S(n), D(n+1000), D(n+1000) delivered scan n+1000 twice (regression)."""
+        asm = UdtAssembler()
+        asm.feed_datagram(make_status_datagram(100))
+        datagram = make_measurement_datagram(1100, 0, [5] * 271, [1] * 271)
+        self.assertEqual(asm.feed_datagram(datagram), [])         # unconfirmed: kept, not emitted
+        got = asm.feed_datagram(datagram)                         # the same number again: the stream is there
+        got += asm.feed_datagram(datagram)
+        self.assertEqual([s.scan_number for s in got], [1100])
+        self.assertEqual(asm.stats.sequence_jumps, 1)
+
+    def test_far_ahead_scan_is_emitted_once_the_next_cycle_confirms_it(self):
+        """After an outage with the first status lost, the first data cycle is delivered with the next cycle."""
+        asm = UdtAssembler()
+        asm.feed_datagram(make_status_datagram(1))
+        asm.feed_datagram(make_measurement_datagram(1, 0, [1] * 271, [1] * 271))
+        self.assertEqual(asm.feed_datagram(make_measurement_datagram(500, 0, [5] * 271, [1] * 271)), [])
+        got = asm.feed_datagram(make_status_datagram(501))
+        self.assertEqual([(s.scan_number, s.complete) for s in got], [(500, True)])
+        self.assertEqual(got[0].distances_mm, (5,) * 271)
+        got = asm.feed_datagram(make_measurement_datagram(501, 0, [6] * 271, [1] * 271))
+        self.assertEqual([s.scan_number for s in got], [501])
+        self.assertEqual(got[0].status.scan_number, 501)
+
+    def test_restart_does_not_emit_an_unconfirmed_far_ahead_cycle(self):
+        asm = UdtAssembler(strict=False)
+        asm.feed_datagram(make_status_datagram(5000))
+        asm.feed_datagram(make_measurement_datagram(5000, 0, [1] * 271, [1] * 271))
+        asm.feed_datagram(make_measurement_datagram(9000, 0, [9] * 271, [1] * 271))          # stray
+        got = asm.feed_datagram(make_status_datagram(3))                                     # counter restarted
+        got += asm.feed_datagram(make_measurement_datagram(3, 0, [3] * 271, [1] * 271))
+        self.assertEqual([s.scan_number for s in got], [3])
+        self.assertEqual(asm.stats.sequence_resets, 1)
+
+    def test_late_status_of_an_older_cycle_does_not_turn_back_the_status(self):
+        """Found by model checking: S(n+1), late S(n), D(n+1) stripped scan n+1 of its status (regression)."""
+        asm = UdtAssembler()
+        asm.feed_datagram(make_status_datagram(10))
+        asm.feed_datagram(make_measurement_datagram(10, 0, [1] * 271, [1] * 271))
+        asm.feed_datagram(make_status_datagram(11, ossd=False))
+        self.assertEqual(asm.feed_datagram(make_status_datagram(10)), [])                 # duplicate arriving late
+        scans = asm.feed_datagram(make_measurement_datagram(11, 0, [2] * 271, [1] * 271))
+        self.assertEqual(scans[0].status.scan_number, 11)
+        self.assertFalse(scans[0].status.ossd_a)
+        self.assertEqual(asm.latest_status.scan_number, 11)
+        self.assertEqual(asm.stats.stale_datagrams, 1)
+        self.assertEqual(asm.stats.status_received, 2)
+
+    def test_late_status_newer_than_the_held_one_is_adopted(self):
+        asm = UdtAssembler()
+        asm.feed_datagram(make_status_datagram(10))
+        for n in (10, 11, 12):                                    # the statuses of 11 and 12 are delayed
+            asm.feed_datagram(make_measurement_datagram(n, 0, [n] * 271, [1] * 271))
+        asm.feed_datagram(make_status_datagram(11))
+        self.assertEqual(asm.latest_status.scan_number, 11)
+        asm.feed_datagram(make_status_datagram(10))
+        self.assertEqual(asm.latest_status.scan_number, 11)       # never backwards
+        self.assertEqual(asm.stats.stale_datagrams, 1)
+
+    def test_status_held_before_a_restart_does_not_block_the_new_run(self):
+        asm = UdtAssembler()
+        asm.feed_datagram(make_status_datagram(5000))
+        asm.feed_datagram(make_measurement_datagram(5000, 0, [1] * 271, [1] * 271))
+        asm.feed_datagram(make_measurement_datagram(10, 0, [1] * 271, [1] * 271))  # counter restarted, status lost
+        asm.feed_datagram(make_measurement_datagram(11, 0, [1] * 271, [1] * 271))
+        asm.feed_datagram(make_status_datagram(10))                                # late status of the new run
+        self.assertEqual(asm.stats.sequence_resets, 1)
+        self.assertEqual(asm.latest_status.scan_number, 10)
+
+    def test_every_datagram_is_counted_exactly_once(self):
+        """bad + unknown + stale + outlier + accepted == datagrams, over a messy stream."""
+        asm = UdtAssembler()
+        accepted = 0
+        stream = [
+            make_status_datagram(1), make_measurement_datagram(1, 0, [1] * 271, [1] * 271),
+            make_measurement_datagram(1, 0, [1] * 271, [1] * 271),                 # stale data
+            make_status_datagram(2), make_status_datagram(1),                      # stale status
+            make_measurement_datagram(900, 0, [9] * 271, [1] * 271),               # outlier
+            b"short",                                                              # bad frame
+            make_frame(FRAME_SIZE + 4, 9, 0, 2) + b"abcd",                         # unknown id
+            make_frame(FRAME_SIZE, TELEGRAM_ID_DISTANCE, 0, 2),                    # empty measurement: bad
+            make_measurement_datagram(2, 0, [2] * 271, [1] * 271),
+        ]
+        for datagram in stream:
+            before = (asm.stats.bad_frames, asm.stats.unknown_ids, asm.stats.stale_datagrams,
+                      asm.stats.outlier_datagrams)
+            asm.feed_datagram(datagram)
+            after = (asm.stats.bad_frames, asm.stats.unknown_ids, asm.stats.stale_datagrams,
+                     asm.stats.outlier_datagrams)
+            self.assertLessEqual(sum(after) - sum(before), 1)
+            accepted += sum(after) == sum(before)
+        self.assertEqual(asm.stats.datagrams, len(stream))
+        self.assertEqual((asm.stats.bad_frames, asm.stats.unknown_ids, asm.stats.stale_datagrams,
+                          asm.stats.outlier_datagrams), (2, 1, 2, 1))
+        self.assertEqual(accepted, 4)
+        self.assertEqual(asm.stats.scans_completed, 2)
 
     def test_mixed_telegram_ids_rejected(self):
         asm = UdtAssembler()
@@ -879,6 +1117,13 @@ class ScanViewTests(unittest.TestCase):
         scan = self.make_scan(contour=(0, 5, 5), values=[1500, 250])
         self.assertEqual(scan.distances_m, (1.5, 0.25))
         self.assertIs(scan.distances_m, scan.distances_m)
+
+    def test_scan_carries_wall_and_monotonic_receive_times(self):
+        wall, mono = time.time(), time.monotonic()
+        scan = self.make_scan()
+        self.assertGreaterEqual(scan.received_at, wall - 1.0)
+        self.assertTrue(mono <= scan.received_monotonic <= time.monotonic())
+        self.assertTrue(0.0 <= scan.age_s() < 5.0)
 
 
 class EndToEndTests(unittest.TestCase):
@@ -1103,6 +1348,112 @@ class EndToEndTests(unittest.TestCase):
         self.assertTrue(scan.complete)
         self.assertEqual(receiver.stats["receiver_errors"], 1)
         self.assertTrue(receiver.is_running)
+
+    def test_latest_scan_skips_the_backlog(self):
+        receiver = self.start_receiver(scan_queue_size=4)
+        self.assertIsNone(receiver.latest_scan)
+        self.start_simulator(receiver.port)
+        first = receiver.get_scan(timeout=5.0)
+        deadline = time.monotonic() + 5.0
+        while receiver.stats["scans_dropped_queue"] == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)                                      # nobody consumes: a backlog builds up
+        newest = receiver.latest_scan
+        queued = receiver.get_scan(timeout=1.0)                   # get_scan() serves the backlog in order
+        self.assertGreater(newest.scan_number, queued.scan_number)
+        self.assertGreater(newest.scan_number, first.scan_number)
+        self.assertLess(newest.age_s(), 2.0)
+        receiver.stop()
+        self.assertIsNotNone(receiver.latest_scan)                # still readable after stop()
+        receiver.start()
+        self.assertIsNone(receiver.latest_scan)                   # a new session starts empty
+
+    def feed_cycle(self, receiver, sender, number, value):
+        for datagram in (make_status_datagram(number),
+                         make_measurement_datagram(number, 0, [value] * 271, [1] * 271)):
+            receiver._handle_datagram(datagram, sender, lambda: True)
+
+    def drain(self, receiver):
+        scans = []
+        while receiver.scans_available:
+            scans.append(receiver.get_scan(timeout=0.1))
+        return scans
+
+    def test_second_scanner_on_the_same_port_is_ignored_not_merged(self):
+        """Two units pushing to one port (same counter range, as when powered together) stay separate."""
+        receiver = RSL235Udt(port=self.free_udp_port())
+        with self.assertLogs("leuze_rsl.udt", level="WARNING") as logs:
+            for n in range(1, 6):
+                self.feed_cycle(receiver, "192.168.20.101", 1000 + n, 1)
+                self.feed_cycle(receiver, "192.168.20.103", 1000 + n - 1, 2)     # other unit, one cycle behind
+                self.feed_cycle(receiver, "192.168.20.103", 1000 + n + 1, 2)     # ... and ahead
+        scans = self.drain(receiver)
+        self.assertEqual([s.scan_number for s in scans], [1001, 1002, 1003, 1004, 1005])
+        self.assertTrue(all(set(s.distances_mm) == {1} for s in scans))          # only the first unit's data
+        self.assertEqual(receiver.source_address, "192.168.20.101")
+        self.assertEqual(receiver.stats["foreign_datagrams_dropped"], 20)
+        self.assertEqual(receiver.stats["stale_datagrams"], 0)
+        self.assertEqual(len(logs.records), 1)                                   # reported once, not per datagram
+        self.assertIn("192.168.20.103", logs.output[0])
+        self.assertIn("192.168.20.101", logs.output[0])
+
+    def test_another_scanner_takes_over_once_the_first_is_silent(self):
+        receiver = RSL235Udt(port=self.free_udp_port(), data_timeout=3.0)
+        self.assertIsNone(receiver.source_address)
+        self.feed_cycle(receiver, "192.168.20.101", 500, 1)
+        with self.assertLogs("leuze_rsl.udt", level="WARNING"):
+            self.feed_cycle(receiver, "192.168.20.103", 77, 2)                   # first unit still alive: ignored
+        self.assertEqual(receiver.source_address, "192.168.20.101")
+        receiver._last_rx -= 10.0                                                # ... silent for 10 s
+        with self.assertLogs("leuze_rsl.udt", level="WARNING") as logs:
+            self.feed_cycle(receiver, "192.168.20.103", 78, 2)
+        self.assertEqual(receiver.source_address, "192.168.20.103")
+        self.assertIn("now come from 192.168.20.103", logs.output[0])
+        self.assertEqual([set(s.distances_mm) for s in self.drain(receiver)], [{1}, {2}])
+
+    def test_garbage_from_another_host_does_not_take_the_stream(self):
+        receiver = RSL235Udt(port=self.free_udp_port())
+        receiver._handle_datagram(b"not a telegram", "10.9.9.9", lambda: True)   # e.g. a port scan
+        self.assertIsNone(receiver.source_address)
+        self.feed_cycle(receiver, "192.168.20.101", 500, 1)                      # the scanner is not locked out
+        self.assertEqual(receiver.source_address, "192.168.20.101")
+        self.assertEqual(len(self.drain(receiver)), 1)
+        self.assertEqual(receiver.stats["bad_frames"], 1)
+
+    def test_source_ip_pins_the_sender(self):
+        receiver = RSL235Udt(port=self.free_udp_port(), source_ip="192.168.20.103")
+        self.feed_cycle(receiver, "192.168.20.101", 500, 1)
+        self.feed_cycle(receiver, "192.168.20.103", 600, 2)
+        self.assertEqual([set(s.distances_mm) for s in self.drain(receiver)], [{2}])
+        self.assertEqual(receiver.stats["foreign_datagrams_dropped"], 2)
+        self.assertEqual(receiver.source_address, "192.168.20.103")
+
+    def test_two_senders_over_real_sockets(self):
+        second = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.addCleanup(second.close)
+        try:
+            second.bind(("127.0.0.2", 0))
+        except OSError:
+            self.skipTest("no second loopback address on this platform")
+        receiver = self.start_receiver()
+        self.start_simulator(receiver.port)                                     # sends from 127.0.0.1
+        receiver.get_scan(timeout=5.0)
+        with self.assertLogs("leuze_rsl.udt", level="WARNING") as logs:
+            try:
+                for n in range(5):
+                    second.sendto(make_status_datagram(900000 + n), ("127.0.0.1", receiver.port))
+                    second.sendto(make_measurement_datagram(900000 + n, 0, [7] * 271, [1] * 271),
+                                  ("127.0.0.1", receiver.port))
+            except OSError:
+                self.skipTest("cannot send between loopback addresses on this platform")
+            deadline = time.monotonic() + 5.0
+            while receiver.stats["foreign_datagrams_dropped"] < 10 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertEqual(len(logs.records), 1)
+        self.assertEqual(receiver.stats["foreign_datagrams_dropped"], 10)
+        self.assertEqual(receiver.source_address, "127.0.0.1")
+        self.assertEqual(receiver.stats["sequence_jumps"], 0)
+        for _ in range(5):
+            self.assertNotEqual(set(receiver.get_scan(timeout=5.0).distances_mm), {7})
 
     def test_constructor_validation(self):
         for kwargs in (dict(port=0), dict(port=70000),
