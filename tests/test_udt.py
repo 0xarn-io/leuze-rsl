@@ -1662,16 +1662,24 @@ class EndToEndTests(unittest.TestCase):
     def test_latest_scan_skips_the_backlog(self):
         receiver = self.start_receiver(scan_queue_size=4)
         self.assertIsNone(receiver.latest_scan)
-        self.start_simulator(receiver.port)
+        simulator = self.start_simulator(receiver.port)
         first = receiver.get_scan(timeout=5.0)
         deadline = time.monotonic() + 5.0
         while receiver.stats["scans_dropped_queue"] == 0 and time.monotonic() < deadline:
             time.sleep(0.01)                                      # nobody consumes: a backlog builds up
+        simulator.stop()                                          # freeze the stream before comparing
+        seen = -1
+        while receiver.stats["datagrams"] != seen:                # let datagrams in flight arrive
+            seen = receiver.stats["datagrams"]
+            time.sleep(0.2)
+        self.assertEqual(receiver.scans_available, 4)
         newest = receiver.latest_scan
-        queued = receiver.get_scan(timeout=1.0)                   # get_scan() serves the backlog in order
-        self.assertGreater(newest.scan_number, queued.scan_number)
+        queued = [receiver.get_scan(timeout=1.0) for _ in range(4)]   # get_scan() serves the backlog in order
+        self.assertEqual([s.scan_number for s in queued], sorted(s.scan_number for s in queued))
+        self.assertIs(queued[-1], newest)                         # the newest scan is the last one in the backlog
+        self.assertGreater(newest.scan_number, queued[0].scan_number)
         self.assertGreater(newest.scan_number, first.scan_number)
-        self.assertLess(newest.age_s(), 2.0)
+        self.assertLess(newest.age_s(), 5.0)
         receiver.stop()
         self.assertIsNotNone(receiver.latest_scan)                # still readable after stop()
         receiver.start()

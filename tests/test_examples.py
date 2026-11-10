@@ -46,8 +46,10 @@ class RecordReplayTests(unittest.TestCase):
                 blob = handle.read()
             self.assertEqual(blob[:8], b"LRSLUDT1")
             received, ip, length = struct.unpack_from("<d4sH", blob, 8)
-            self.assertEqual((socket.inet_ntoa(ip), length), ("127.0.0.1", 56))    # a status datagram comes first
+            self.assertEqual(socket.inet_ntoa(ip), "127.0.0.1")
+            self.assertIn(length, (56, 1104))     # the recorder joins a running stream: status or data first
             self.assertGreater(received, 1.6e9)
+            self.assertEqual(blob[8 + 14:8 + 14 + 4], struct.pack("<I", length))   # the datagram's own length field
 
             again = run_example("record_udt.py", "--port", str(port), "--seconds", "0.2", "--out", capture)
             self.assertEqual(again.returncode, 1)                                   # never overwrites silently
