@@ -88,16 +88,15 @@ EXIT_ERROR = 1
 EXIT_INTERRUPTED = 130
 
 
-def _udp_bindable(port: int) -> bool:
-    """True if a UDP socket can be bound to ``port`` on all interfaces right now."""
+def _udp_ephemeral_port() -> int:
+    """A port number the OS currently hands out for UDP on all interfaces."""
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         if sys.platform == "win32":
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        probe.bind(("", port))
-        return True
-    except OSError:
-        return False
+        probe.bind(("", 0))
+        port: int = probe.getsockname()[1]
+        return port
     finally:
         probe.close()
 
@@ -315,30 +314,33 @@ class RodSimulator:
     def _bind_listener(self) -> socket.socket:
         """Bind and listen on the command port.
 
-        With ``port`` 0 the OS picks an ephemeral port, and a client binds
+        With ``port`` 0 the simulator chooses the port, and a client binds
         the *same* number for UDP (the real device pushes to the command
-        port).  Windows excludes port ranges per protocol, so a number the
-        OS hands out for TCP may be refused for UDP (WSAEACCES); such a
-        port is given back and another one is tried.
+        port), so the number must be usable for both protocols.  Windows
+        reserves port ranges per protocol and hands out TCP ports one after
+        the other: asking for a TCP port and checking it for UDP can fail
+        many times in a row inside a range reserved for UDP.  So the OS is
+        asked for a UDP port first and the listener is bound to that number;
+        if TCP refuses it, the next UDP port is tried.
         """
-        for _ in range(32):
+        coupled = self.port == 0 and self._udp_dest_port is None
+        last_error: Optional[OSError] = None
+        for _ in range(64 if coupled else 1):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 if os.name != "nt":
                     # Allow a quick restart on the same port (TIME_WAIT); on
                     # Windows the option would let us bind an occupied port.
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.bind((self.host, self.port))
+                sock.bind((self.host, _udp_ephemeral_port() if coupled else self.port))
                 sock.listen(1)
                 sock.settimeout(_POLL_S)
-            except OSError:
-                sock.close()
-                raise
-            if (self.port != 0 or self._udp_dest_port is not None
-                    or _udp_bindable(sock.getsockname()[1])):
                 return sock
-            sock.close()
-        raise OSError("no ephemeral port usable for both TCP and UDP found")
+            except OSError as exc:
+                sock.close()
+                last_error = exc
+        assert last_error is not None
+        raise last_error
 
     def stop(self) -> None:
         """Stop streaming, drop the client and close the listen socket (idempotent)."""

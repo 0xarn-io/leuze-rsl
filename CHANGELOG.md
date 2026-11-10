@@ -44,6 +44,11 @@ units. The decoder and the geometry needed no correction; the receiver did.
 - `examples/record_udt.py` validates its arguments, reports socket and file
   errors without a traceback and no longer overwrites an existing recording
   (`--force` to allow it).
+- `RodSimulator(port=0)` could fail on Windows with "no ephemeral port
+  usable for both TCP and UDP": it asked for a TCP port and probed it for
+  UDP, 32 times at most, and Windows hands out TCP ports consecutively, so
+  all of them could lie in a range reserved for UDP. The OS is now asked for
+  a UDP port first and the listener is bound to that number.
 - The simulator's RSL 200 status bytes match captured hardware (byte 5 =
   0x87; CLEAR follows the OSSD).
 - Documentation: the cycles an RSL 235 withholds are every 12th scan number
