@@ -1718,7 +1718,19 @@ class EndToEndTests(unittest.TestCase):
             self.feed_cycle(receiver, "192.168.20.103", 78, 2)
         self.assertEqual(receiver.source_address, "192.168.20.103")
         self.assertIn("now come from 192.168.20.103", logs.output[0])
-        self.assertEqual([set(s.distances_mm) for s in self.drain(receiver)], [{1}, {2}])
+        first, second = self.drain(receiver)
+        self.assertEqual((set(first.distances_mm), set(second.distances_mm)), ({1}, {2}))
+        # the new scanner starts from a clean slate: its own status at once, no "restart" of the old counter
+        self.assertEqual((second.scan_number, second.status.scan_number), (78, 78))
+        self.assertEqual(receiver.latest_status.scan_number, 78)
+        stats = receiver.stats
+        self.assertEqual((stats["datagrams"], stats["scans_completed"]), (4, 2))        # the counters carry on
+        self.assertEqual((stats["sequence_resets"], stats["sequence_jumps"], stats["foreign_datagrams_dropped"]),
+                         (0, 0, 2))
+        receiver._last_rx -= 10.0
+        receiver._handle_datagram(b"garbage", "10.9.9.9", lambda: True)          # garbage never takes over
+        self.assertEqual(receiver.source_address, "192.168.20.103")
+        self.assertEqual(receiver.latest_status.scan_number, 78)
 
     def test_garbage_from_another_host_does_not_take_the_stream(self):
         receiver = RSL235Udt(port=self.free_udp_port())
@@ -1764,6 +1776,16 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(receiver.stats["sequence_jumps"], 0)
         for _ in range(5):
             self.assertNotEqual(set(receiver.get_scan(timeout=5.0).distances_mm), {7})
+
+    def test_is_receiving_survives_a_concurrent_restart(self):
+        """Regression: is_receiving read the timestamp twice and raised TypeError when start() reset it in between."""
+        receiver = RSL235Udt(port=self.free_udp_port())
+
+        values = iter([123.0, None])                  # what two consecutive reads would see during a restart
+        receiver._running = True
+        with mock.patch.object(RSL235Udt, "_last_rx", new_callable=mock.PropertyMock,
+                               side_effect=lambda: next(values), create=True):
+            self.assertIn(receiver.is_receiving, (True, False))    # must not raise
 
     def test_constructor_validation(self):
         for kwargs in (dict(port=0), dict(port=70000),

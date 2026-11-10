@@ -20,8 +20,9 @@ units. The decoder and the geometry needed no correction; the receiver did.
   and ignores telegrams of any other sender while that scanner is alive:
   they are counted in `stats["foreign_datagrams_dropped"]` and the conflict
   is logged once. Another sender may take over after `data_timeout` seconds
-  of silence; `source_ip` still pins the sender. Garbage from another host
-  can no longer lock the scanner out.
+  of silence and then starts from a clean state (its own counter, contour
+  and status; the statistics carry on); `source_ip` still pins the sender.
+  Datagrams that are not data telegrams never take the stream.
 - **A scan far ahead of the stream could be delivered twice** and switched
   off duplicate protection for the cycles after it: a complete cycle whose
   number was not confirmed yet was emitted at once. Such a cycle is now
@@ -37,6 +38,9 @@ units. The decoder and the geometry needed no correction; the receiver did.
   "address already in use": the previous session's receiver thread keeps the
   port bound until it leaves `recvfrom()`. `start()` now waits for it. Found
   by a concurrency stress test.
+- **`is_receiving` could raise `TypeError`** when `start()` ran on another
+  thread at the same moment (the timestamp was read twice). Present since
+  0.3.0; found by the same stress test.
 - `examples/record_udt.py` validates its arguments, reports socket and file
   errors without a traceback and no longer overwrites an existing recording
   (`--force` to allow it).

@@ -1287,9 +1287,10 @@ class RSL235Udt:
 
     @property
     def is_receiving(self) -> bool:
-        if not self._running or self._last_rx is None:
+        last_rx = self._last_rx         # read once: start() on another thread resets it
+        if not self._running or last_rx is None:
             return False
-        return (time.monotonic() - self._last_rx) < self.data_timeout
+        return (time.monotonic() - last_rx) < self.data_timeout
 
     @property
     def stats(self) -> Dict[str, int]:
@@ -1360,16 +1361,23 @@ class RSL235Udt:
 
     def _process(self, data: bytes, sender: str, still_current: Callable[[], bool]) -> None:
         assembler = self._assembler
+        takeover = self._source is not None and sender != self._source
+        if takeover:
+            # Another scanner takes over the port of one that went silent.
+            # Its scan counter, contour and status are unrelated to the old
+            # one's, so it starts from a clean assembler; the counters go on.
+            assembler = UdtAssembler(strict=self.strict)
+            assembler.stats = self._assembler.stats
         had_status = assembler.stats.status_received
         rejected = assembler.stats.bad_frames + assembler.stats.unknown_ids
         scans = assembler.feed_datagram(data)
         if assembler.stats.bad_frames + assembler.stats.unknown_ids == rejected:
             self._last_rx = time.monotonic()     # only genuine telegrams count
-            if sender != self._source:
-                if self._source is not None:
-                    log.warning("UDP port %d: data telegrams now come from %s (previously %s)",
-                                self.port, sender, self._source)
-                self._source = sender
+            if takeover:
+                log.warning("UDP port %d: data telegrams now come from %s (previously %s)",
+                            self.port, sender, self._source)
+                self._assembler = assembler
+            self._source = sender
         for scan in scans:
             self._deliver(scan, still_current)
         if (self.on_status is not None
