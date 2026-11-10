@@ -88,16 +88,15 @@ EXIT_ERROR = 1
 EXIT_INTERRUPTED = 130
 
 
-def _udp_bindable(port: int) -> bool:
-    """True if a UDP socket can be bound to ``port`` on all interfaces right now."""
+def _udp_ephemeral_port() -> int:
+    """A port number the OS currently hands out for UDP on all interfaces."""
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         if sys.platform == "win32":
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        probe.bind(("", port))
-        return True
-    except OSError:
-        return False
+        probe.bind(("", 0))
+        port: int = probe.getsockname()[1]
+        return port
     finally:
         probe.close()
 
@@ -315,30 +314,33 @@ class RodSimulator:
     def _bind_listener(self) -> socket.socket:
         """Bind and listen on the command port.
 
-        With ``port`` 0 the OS picks an ephemeral port, and a client binds
+        With ``port`` 0 the simulator chooses the port, and a client binds
         the *same* number for UDP (the real device pushes to the command
-        port).  Windows excludes port ranges per protocol, so a number the
-        OS hands out for TCP may be refused for UDP (WSAEACCES); such a
-        port is given back and another one is tried.
+        port), so the number must be usable for both protocols.  Windows
+        reserves port ranges per protocol and hands out TCP ports one after
+        the other: asking for a TCP port and checking it for UDP can fail
+        many times in a row inside a range reserved for UDP.  So the OS is
+        asked for a UDP port first and the listener is bound to that number;
+        if TCP refuses it, the next UDP port is tried.
         """
-        for _ in range(32):
+        coupled = self.port == 0 and self._udp_dest_port is None
+        last_error: Optional[OSError] = None
+        for _ in range(64 if coupled else 1):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 if os.name != "nt":
                     # Allow a quick restart on the same port (TIME_WAIT); on
                     # Windows the option would let us bind an occupied port.
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.bind((self.host, self.port))
+                sock.bind((self.host, _udp_ephemeral_port() if coupled else self.port))
                 sock.listen(1)
                 sock.settimeout(_POLL_S)
-            except OSError:
-                sock.close()
-                raise
-            if (self.port != 0 or self._udp_dest_port is not None
-                    or _udp_bindable(sock.getsockname()[1])):
                 return sock
-            sock.close()
-        raise OSError("no ephemeral port usable for both TCP and UDP found")
+            except OSError as exc:
+                sock.close()
+                last_error = exc
+        assert last_error is not None
+        raise last_error
 
     def stop(self) -> None:
         """Stop streaming, drop the client and close the listen socket (idempotent)."""
@@ -772,7 +774,9 @@ class UdtSimulator:
     **Status knobs** (plain attributes, read for every status datagram, so
     they can be changed while running): ``ossd``, ``protective_field_free``,
     ``warning_field_free`` (RSL 200: warning fields 1 and 2), ``error`` (the
-    collective ERROR bit), ``signature`` (RSL 400 only: the 8-byte
+    collective ERROR bit), ``contamination_warning`` (optics cover warning:
+    the collective warning bit plus the contamination bits, set together as
+    on RSL 235 hardware), ``signature`` (RSL 400 only: the 8-byte
     configuration signature, sent as the 12-byte trailer).
 
     **Environment knobs** (read at :meth:`start`): a rectangular room
@@ -821,6 +825,7 @@ class UdtSimulator:
                  protective_field_free: bool = True,
                  warning_field_free: bool = True,
                  error: bool = False,
+                 contamination_warning: bool = False,
                  signature: Optional[bytes] = None,
                  profile_type: Optional[int] = None,
                  contour_offset: Optional[int] = None,
@@ -887,6 +892,7 @@ class UdtSimulator:
         self.protective_field_free = protective_field_free
         self.warning_field_free = warning_field_free
         self.error = error
+        self.contamination_warning = contamination_warning
         self.signature = signature
         self.profile_type = profile_type
         self.contour_offset = contour_offset
@@ -996,11 +1002,14 @@ class UdtSimulator:
         p = bytearray(28)
         p[0] = STATUS_PROFILE_TYPE_RSL200
         p[1] = 1                                                   # OP-MODE: safety mode
-        p[2] = 0x80 if self.error else 0                           # ERROR
+        p[2] = ((0x80 if self.error else 0)                        # ERROR
+                | (0x62 if self.contamination_warning else 0))     # WARNING + SCREEN + SCREEN_WARNING
         p[3] = ((0x80 if self.ossd else 0)                         # OSSD on
                 | (0x40 if self.protective_field_free else 0)      # PF_VIO: 1 = free
-                | (0x30 if self.warning_field_free else 0))        # WF_VIO_1/2: 1 = free
+                | (0x30 if self.warning_field_free else 0)         # WF_VIO_1/2: 1 = free
+                | (0x04 if self.ossd else 0))                      # CLEAR: follows the OSSD on hardware
         p[4] = 1                                                   # TRIPLE_SEL
+        p[5] = 0x87                                                # SSREC + undocumented bits, as captured
         struct.pack_into("<HH", p, 8, self.SUPPLY_VOLTAGE_RAW, self.TEMPERATURE_RAW)
         struct.pack_into("<I", p, 16, scan_number & 0xFFFFFFFF)   # SCAN_NUM
         # bytes 20..27: SAFE_SIG, ERR_CLASS, ERR_NUM, reserved = 0
@@ -1011,7 +1020,8 @@ class UdtSimulator:
         p = bytearray(20)
         p[0] = STATUS_PROFILE_TYPE_RSL400
         p[1] = 1                                                   # OP-MODE: safety mode
-        p[2] = (0x80 if self.error else 0) | (0x02 if self.ossd else 0)   # ERROR, A-OSSD
+        p[2] = ((0x80 if self.error else 0) | (0x02 if self.ossd else 0)   # ERROR, A-OSSD
+                | (0x60 if self.contamination_warning else 0))             # ALARM + SCREEN
         struct.pack_into("<I", p, 8, scan_number & 0xFFFFFFFF)    # Scan
         p[12] = (0x80                                              # A-ACTIVE
                  | (0x40 if self.warning_field_free else 0)        # A-WF-VIO: 1 = free

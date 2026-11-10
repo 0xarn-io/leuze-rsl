@@ -4,40 +4,61 @@
 Needs only the standard library, so it can run on any machine the scanners
 push to (configure this machine's IP and one port per scanner under Sensor
 Studio > SETTINGS > Data telegrams).  The files hold the datagrams exactly as
-sent, for offline analysis or a bug report:
+sent, for offline analysis (see replay_udt.py) or a bug report:
 
     python3 examples/record_udt.py --port 9999 --seconds 10 --out rsl235.bin
     python3 examples/record_udt.py --port 9991 9992 9993 9994 9995 9996
 
 With several ports, every port is recorded to its own file (``--out`` must
-contain ``{port}``; the default is ``udt_{port}.bin``).
+contain ``{port}``; the default is ``udt_{port}.bin``).  Existing files are
+not overwritten unless ``--force`` is given.
 
 File format (little-endian): the 8-byte magic ``LRSLUDT1``, then one record
 per datagram: ``<d4sH`` = receive time (seconds since the epoch), source IPv4
 address, payload length, followed by the payload bytes.
+
+Exit codes: 0 every port received data, 1 a port received nothing or an
+error occurred, 2 usage error.
 """
 
 import argparse
 import select
 import socket
 import struct
+import sys
 import time
-from typing import Dict
+from typing import BinaryIO, Dict, Tuple
 
 MAGIC = b"LRSLUDT1"
 RECORD = struct.Struct("<d4sH")
 
 
+def _port(text: str) -> int:
+    value = int(text)
+    if not 1 <= value <= 65535:
+        raise argparse.ArgumentTypeError("port must be in 1..65535")
+    return value
+
+
+def _positive_float(text: str) -> float:
+    value = float(text)
+    if not value > 0:
+        raise argparse.ArgumentTypeError("must be > 0")
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--port", type=int, nargs="+", default=[3050], metavar="PORT",
+    parser.add_argument("--port", type=_port, nargs="+", default=[3050], metavar="PORT",
                         help="UDP port(s) the scanner(s) push to (default: %(default)s)")
-    parser.add_argument("--seconds", type=float, default=10.0,
+    parser.add_argument("--seconds", type=_positive_float, default=10.0,
                         help="recording duration (default: %(default)s)")
     parser.add_argument("--out", default="udt_{port}.bin",
                         help="output file; {port} is replaced by the port number "
                              "(default: %(default)s)")
+    parser.add_argument("--force", action="store_true",
+                        help="overwrite existing output files")
     args = parser.parse_args()
     if len(set(args.port)) != len(args.port):
         parser.error("ports must be distinct")
@@ -45,17 +66,18 @@ def main() -> int:
         parser.error("--out must contain {port} when recording several ports")
 
     sockets: Dict[socket.socket, int] = {}
-    files = {}
+    files: Dict[int, Tuple[str, BinaryIO]] = {}
     counts = {port: 0 for port in args.port}
     try:
         for port in args.port:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.bind(("", port))
             sockets[sock] = port
+            sock.bind(("", port))
             path = args.out.replace("{port}", str(port))
-            files[port] = (path, open(path, "wb"))
-            files[port][1].write(MAGIC)
-        print("recording UDP port(s) %s for %.0f s ... Ctrl+C to stop early"
+            out = open(path, "wb" if args.force else "xb")
+            files[port] = (path, out)
+            out.write(MAGIC)
+        print("recording UDP port(s) %s for %g s ... Ctrl+C to stop early"
               % (", ".join(str(p) for p in args.port), args.seconds))
         deadline = time.monotonic() + args.seconds
         while True:
@@ -73,6 +95,12 @@ def main() -> int:
                 counts[port] += 1
     except KeyboardInterrupt:
         pass
+    except FileExistsError as exc:
+        print("error: %s already exists (use --force to overwrite)" % exc.filename, file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 1
     finally:
         for sock in sockets:
             sock.close()

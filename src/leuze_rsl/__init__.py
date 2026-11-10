@@ -55,7 +55,7 @@ from .udt import (
     UdtStats,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     # UDP data telegrams ("UDT") -- what RSL 200 / RSL 400 hardware pushes

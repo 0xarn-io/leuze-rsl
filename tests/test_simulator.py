@@ -178,6 +178,25 @@ class UdtStatusDatagramTests(unittest.TestCase):
         self.assertEqual(profile[12:16], b"\0\0\0\0")
         self.assertEqual(profile[20:28], b"\0" * 8)
 
+    def test_contamination_warning_knob_and_hardware_like_bytes(self):
+        """The RSL 200 profile mirrors captured hardware: byte 5 = 0x87, CLEAR follows the OSSD, warning bits together."""
+        sim = UdtSimulator(contamination_warning=True)
+        block = sim.status_block(7)
+        self.assertEqual((block[2], block[3], block[5]), (0x62, 0xF4, 0x87))
+        status = StatusProfile.from_bytes(block)
+        self.assertTrue(status.warning and status.screen_contaminated and status.screen_warning)
+        self.assertFalse(status.screen_error or status.error)
+        self.assertEqual((status.ossd_a, status.ossd_clear, status.event_log), (True, True, True))
+        sim.contamination_warning = False
+        sim.ossd = False
+        status = StatusProfile.from_bytes(sim.status_block(8))
+        self.assertFalse(status.warning or status.screen_warning)
+        self.assertEqual((status.ossd_a, status.ossd_clear), (False, False))
+        rsl400 = StatusProfile.from_bytes(UdtSimulator(family=ScannerFamily.RSL400,
+                                                       contamination_warning=True).status_block(1))
+        self.assertTrue(rsl400.alarm and rsl400.screen_contaminated)
+        self.assertEqual((rsl400.ossd_clear, rsl400.event_log), (None, None))
+
     def test_status_knobs_drive_the_flags(self):
         sim = UdtSimulator(ossd=False, protective_field_free=False,
                            warning_field_free=False, error=True)
@@ -629,18 +648,32 @@ class RodSimulatorLifecycleTests(unittest.TestCase):
             probe.bind(("", sim.port))                       # must not raise
         finally:
             probe.close()
-        # a port the OS hands out for TCP but refuses for UDP is given back
-        import leuze_rsl.simulator as simulator_module
-        with mock.patch.object(simulator_module, "_udp_bindable", side_effect=[False, False, True]) as probe_fn:
-            sim2 = RodSimulator().start()
-            self.addCleanup(sim2.stop)
-        self.assertEqual(probe_fn.call_count, 3)
-        self.assertTrue(sim2.running)
-        # an explicit udp_dest_port skips the probe (the client binds that port instead)
-        with mock.patch.object(simulator_module, "_udp_bindable", side_effect=AssertionError) as probe_fn:
+
+    def test_port_choice_starts_from_udp_and_retries_when_tcp_refuses(self):
+        """Regression (Windows CI): TCP-first selection failed 32 times in a row inside a UDP-reserved range."""
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(blocker.close)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        taken = blocker.getsockname()[1]
+        free = free_udp_port()
+        with mock.patch.object(simulator_module, "_udp_ephemeral_port", side_effect=[taken, taken, free]) as pick:
+            sim = RodSimulator().start()
+            self.addCleanup(sim.stop)
+        self.assertEqual(pick.call_count, 3)                 # two numbers TCP refused, then one that works
+        self.assertEqual(sim.port, free)
+        # with nothing usable the last bind error is reported, not swallowed
+        with mock.patch.object(simulator_module, "_udp_ephemeral_port", return_value=taken) as pick:
+            failing = RodSimulator()
+            with self.assertRaises(OSError):
+                failing.start()
+        self.assertEqual(pick.call_count, 64)
+        self.assertFalse(failing.running)
+        # an explicit UDP destination or a fixed port needs no coupling
+        with mock.patch.object(simulator_module, "_udp_ephemeral_port", side_effect=AssertionError) as pick:
             sim3 = RodSimulator(udp_dest_port=free_udp_port()).start()
             self.addCleanup(sim3.stop)
-        self.assertEqual(probe_fn.call_count, 0)
+        self.assertEqual(pick.call_count, 0)
 
     def test_commands_received_is_bounded(self):
         sim = RodSimulator().start()
