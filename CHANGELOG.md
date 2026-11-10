@@ -3,6 +3,78 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.0] — 2026-11-10
+
+Result of a second audit with different techniques: an independent decoder
+written from the specification and compared with this one field by field,
+exhaustive model checking of the scan assembler, a numerical fit of the beam
+geometry against Sensor Studio, and replay of captures from seven RSL 235
+units. The decoder and the geometry needed no correction; the receiver did.
+
+### Fixed
+
+- **Two scanners pushing to the same port were merged into one stream.**
+  Scan counters of units that are powered together overlap, so a receiver
+  interleaved scans of both without any warning (reproduced with two real
+  captures). A receiver now follows the first scanner whose telegrams arrive
+  and ignores telegrams of any other sender while that scanner is alive:
+  they are counted in `stats["foreign_datagrams_dropped"]` and the conflict
+  is logged once. Another sender may take over after `data_timeout` seconds
+  of silence; `source_ip` still pins the sender. Garbage from another host
+  can no longer lock the scanner out.
+- **A scan far ahead of the stream could be delivered twice** and switched
+  off duplicate protection for the cycles after it: a complete cycle whose
+  number was not confirmed yet was emitted at once. Such a cycle is now
+  kept, emitted when a following datagram confirms that the stream is
+  there, and discarded when the stream goes on without it (a stray datagram
+  is never emitted as a scan). Found by model checking.
+- **A late or duplicated status telegram of an older cycle** turned
+  `latest_status` back and left the current scan without its status. Status
+  telegrams older than the one held are now ignored and counted in
+  `stale_datagrams`; a status held from before a counter restart no longer
+  blocks the statuses of the new run. Found by model checking.
+- `examples/record_udt.py` validates its arguments, reports socket and file
+  errors without a traceback and no longer overwrites an existing recording
+  (`--force` to allow it).
+- The simulator's RSL 200 status bytes match captured hardware (byte 5 =
+  0x87; CLEAR follows the OSSD).
+- Documentation: the cycles an RSL 235 withholds are every 12th scan number
+  (not every 11th) and the evidence that the device causes them is stated;
+  the signal strengths seen with the 32767 marker reach 607 digits (not
+  "140–190"); the meaning of `error_class` / `error_number` is described as
+  unknown instead of guessed; observations and interpretations are told
+  apart.
+
+### Added
+
+- `RSL235Udt.latest_scan`: the newest scan without blocking and without the
+  `get_scan()` backlog, for consumers that poll slower than the scanner
+  sends; `RSL235Udt.scans_available`; `RSL235Udt.source_address`.
+- `UdtScan.received_monotonic` and `UdtScan.age_s()`: when a scan was
+  completed on the monotonic clock, to reject stale data regardless of
+  wall-clock adjustments.
+- `StatusProfile.warning` (alias of `alarm`; the RSL 200 table calls the bit
+  WARNING), `StatusProfile.ossd_clear` and `StatusProfile.event_log`: the
+  RSL 200 table (3.3) is now decoded completely.
+- `python -m leuze_rsl` prints the device's warning state and names an
+  optics cover contamination warning or error.
+- `examples/replay_udt.py`: decodes recordings made with `record_udt.py`
+  offline and reports missed cycles and device warnings.
+- `UdtSimulator(contamination_warning=True)`.
+- Python 3.14 is tested and declared; the sdist contains the changelog and
+  the examples.
+- Tests: every single bit of both status profiles is checked against tables
+  written from the specification; regression tests for the sequences found
+  by model checking; the record/replay examples run end to end.
+
+### Changed
+
+- An unconfirmed cycle more than 8 scan numbers ahead of the stream is
+  emitted one datagram later than before (when the next datagram confirms
+  it) instead of immediately.
+- CI: GitHub Actions updated to their current major versions (Node 24
+  runtime).
+
 ## [0.4.0] — 2026-10-26
 
 Result of a full audit against the Leuze *RSL 200 / RSL 400 UDP

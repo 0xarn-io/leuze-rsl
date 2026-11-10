@@ -12,7 +12,8 @@ and is decoded as well.
   family exactly as the Leuze specification defines it
 - Strict by default: never emits a silently truncated, duplicated or stitched
   scan (lost datagrams, late datagrams and scanner restarts are detected and
-  counted), wrap-aware scan numbering
+  counted), wrap-aware scan numbering; one receiver follows one scanner and
+  never mixes two
 - Ships **protocol simulators** so everything works without hardware
 - Bonus: a full client for the ROD-300-500 protocol (Leuze ROD 308/508
   navigation scanners), see [below](#the-rod-300-500-protocol-rod-x08)
@@ -22,6 +23,12 @@ configured in Sensor Studio — there is no TCP command channel. The format
 follows the Leuze *RSL 200 / RSL 400 UDP specification* (document 50130122,
 EN 2024/10/01) and was verified against RSL 235 hardware; it is documented
 [below](#protocol-reference).
+
+> **Not a safety component.** This library reads the *measurement and status
+> data* that a safety scanner publishes for diagnostics and navigation. It is
+> not certified, the UDP stream is not a safe channel, and nothing here may be
+> used to implement a safety function — that is what the scanner's OSSDs are
+> for.
 
 ## Install
 
@@ -65,9 +72,9 @@ with RSL235Udt(port=3050) as receiver:          # the port configured above
           scan.angles_deg()[:5])                # beam angles
     if scan.signal_strengths:                   # None for data type ID 6
         print(scan.signal_strengths[:5])
-    if scan.status:                             # this cycle's safety status
+    if scan.status:                             # this cycle's status profile
         print(scan.status.ossd_a, scan.status.a_protective_violated,
-              scan.status.error)
+              scan.status.error, scan.status.warning)   # warning: e.g. dirty optics cover
 ```
 
 Every `UdtScan` exposes:
@@ -80,19 +87,58 @@ Every `UdtScan` exposes:
 | `beam_indices()` / `angles_deg()` | beam geometry from the measurement contour (see [angle convention](#angle-convention)) |
 | `to_cartesian()` | `(x, y)` points in meters, invalid beams skipped |
 | `scan_number`, `blocks`, `complete`, `contour`, `status`, `family` | telegram metadata; `status` is the status profile of *this* cycle (`None` if its telegram was lost) |
+| `received_at`, `received_monotonic`, `age_s()` | when the scan was completed on this host (wall clock / monotonic clock) and how long ago |
 
 Constructor knobs: `bind_address`, `source_ip` (ignore datagrams from other
 devices), `strict` (drop incomplete scans — default — or emit them with
 `complete=False`), `scan_queue_size`, `on_scan` / `on_status` callbacks,
 `data_timeout` (drives `receiver.is_receiving`). Diagnostics:
 `receiver.stats`, `receiver.latest_status`, `receiver.contour`,
-`receiver.family`.
+`receiver.family`, `receiver.source_address`, `receiver.scans_available`.
+
+`get_scan()` hands out scans **in order of arrival**: a consumer slower than
+the scanner works through a backlog of up to `scan_queue_size` scans (0.8 s
+at 40 Hz with the default of 32) before the oldest are dropped. When only the
+newest scan matters, read `receiver.latest_scan` instead — it never blocks
+and never returns backlog — and check `scan.age_s()` to reject stale data.
 
 `get_scan()` raises `ScanTimeoutError` (also a `TimeoutError`) when nothing
 arrives in time and `ReceiverStoppedError` once the receiver is stopped;
 every exception of this package derives from `RSL235Error`. Only one
 receiver can bind a port: a second one fails with `ScannerConnectionError`
 instead of silently stealing the datagrams.
+
+### Several scanners
+
+Give every scanner its **own destination port** and run one receiver per
+port. A receiver follows the first scanner whose telegrams arrive: if a
+second scanner is configured to the same port by mistake, its telegrams are
+ignored, counted in `stats["foreign_datagrams_dropped"]` and reported once
+in the log, instead of being interleaved with the first scanner's scans
+(another sender may take over once the first has been silent for
+`data_timeout`; pass `source_ip` to pin the sender).
+
+```python
+import time
+from leuze_rsl import RSL235Udt
+
+PORTS = {"entry left": 9991, "entry top": 9992, "entry right": 9993}
+receivers = {name: RSL235Udt(port=port).start() for name, port in PORTS.items()}
+try:
+    while True:
+        time.sleep(0.1)                                 # your own cycle
+        for name, receiver in receivers.items():
+            scan = receiver.latest_scan                 # newest scan, never backlog
+            if scan is None or scan.age_s() > 0.2:
+                print(name, "no fresh data")            # not started yet / cable pulled
+                continue
+            if scan.status and scan.status.warning:
+                print(name, "device warning, e.g. optics cover contamination")
+            points = scan.to_cartesian()                # metres, scanner frame
+finally:
+    for receiver in receivers.values():
+        receiver.stop()
+```
 
 ### Examples
 
@@ -101,11 +147,12 @@ python3 examples/read_udt.py --port 3050 --count 10    # print scans + status
 python3 examples/dump_udt.py --port 3050               # raw datagram decoder/hexdump
 python3 examples/record_udt.py --port 3050 --out x.bin # record raw datagrams (stdlib only)
 python3 examples/record_udt.py --port 9991 9992 9993   # several scanners, one file per port
+python3 examples/replay_udt.py udt_9991.bin            # decode a recording offline
 python3 examples/live_plot.py --port 3050              # polar live view (matplotlib)
 ```
 
-All accept `--simulate` to run against the built-in simulator instead of
-hardware. No checkout needed — the installed package also exposes a CLI that
+The readers accept `--simulate` to run against the built-in simulator
+instead of hardware. No checkout needed — the installed package also exposes a CLI that
 reads straight from hardware:
 
 ```bash
@@ -144,8 +191,12 @@ Leuze's RSL 400 ROS driver maps the 2700 reversed indices onto exactly
 (half a step apart). The RSL 200's measurement indices span 270° while its
 protective-field scanning angle is 275°. The sign and offset of index 0
 come from Leuze's RSL 400 ROS driver, not from the UDP document; they were
-verified on an RSL 235 (2026-10-27) by matching a decoded scan, wall by
-wall, against Sensor Studio's live contour view of the same unit. Pass
+verified on an RSL 235 against Sensor Studio's live contour view of the same
+unit: with the defaults the decoded beams lie a median 5 mm from the contour
+Sensor Studio draws (one screenshot pixel is 10 mm), whereas the mirrored
+mapping is off by about 0.9 m and an offset of ±2.5° by about 100 mm on the
+far beams; the best fit for index 0 is +135.0°, and ±1° is already
+measurably worse. Pass
 your own `angle_at_index0` / `index_resolution` to `angles_deg()` /
 `to_cartesian()` if your device or mounting differs.
 
@@ -180,15 +231,15 @@ byte, followed by the 8-byte **measurement contour description**
 | 0 | profile type = 21 |
 | 1 | operating mode: 0 not configured, 1 safety, 2 simulation |
 | 2 | bit 7 ERROR, 6 WARNING, 5 SCREEN (contamination), 4 EDM, 3 FIELD TRIPLE error, 2 SCREEN_ERROR, 1 SCREEN_WARNING |
-| 3 | bit 7 OSSD, 6 PF_VIO, 5 WF_VIO_1, 4 WF_VIO_2 (field bits: **0 = violated, 1 = free**), 3 RES (restart interlock), 2 CLEAR, 1 PARK |
+| 3 | bit 7 OSSD, 6 PF_VIO, 5 WF_VIO_1, 4 WF_VIO_2 (field bits: **0 = violated, 1 = free**), 3 RES (restart interlock), 2 CLEAR ("internal signal OSSD", `ossd_clear`), 1 PARK |
 | 4 | selected field triple (1…32) |
-| 5 | bit 0 SSREC |
+| 5 | bit 0 SSREC ("EventLog", `event_log`); bits 7…1 are not documented and not zero on hardware (byte value 0x7a unconfigured, 0x87 in safety mode) |
 | 6 / 7 | control inputs IN1…IN8 / outputs OUT1…OUT8 (bit 0 = 1) |
 | 8–9 / 10–11 | VOLT (u16, **0.1 V** — the spec says 0.1 mV, but an RSL 235 on a 24 V supply sends 234; `status.supply_voltage_v`) / TEMP (u16, 0.1 °C) |
 | 12–15 | reserved |
-| 16–19 | SCAN_NUM (u32; expected to equal the frame's scan number, as observed on RSL 400 captures — the driver keys status on the frame's number) |
+| 16–19 | SCAN_NUM (u32; equal to the frame's scan number in every captured RSL 235 status telegram — the driver keys status on the frame's number) |
 | 20–23 | SAFE_SIG |
-| 24 / 25–26 | error class / error number |
+| 24 / 25–26 | error class / error number (meaning not documented, see the observations below) |
 | 28–35 | measurement contour description; indices 0…1350, interval 1…8 |
 
 *RSL 400 series, type 1 — 48-byte datagram (20 + 20 + 8), or 60 bytes with
@@ -209,17 +260,26 @@ bytes, firmware ≥ 5.6):*
 | 16–19 | the same for protective function B |
 | 20–27 | measurement contour description; indices 0…2699, interval 1…8 |
 
+For the RSL 400 the driver decodes the collective bits, both OSSDs, E-STOP,
+park, the scan number and, per protective function, active / field
+violations / bank / first field pair. The electrical signals (bytes 4–7),
+the restart and segment bits and the second field pair are not decoded;
+`status.raw` holds the complete block.
+
 **ID 6 — distance**: n × `u16` distance [mm]. **ID 3 — distance + signal
 strength**: n × (`u16` distance [mm] + `u16` signal strength [digits]).
 Large scans are split across datagrams with consecutive `block` numbers;
 all datagrams of one cycle share the `scan_number`. The spec gives the
-distance range as 0…32767 mm (RSL 200) and 0…65535 mm (RSL 400). RSL 235
-hardware uses two markers for beams without a valid measurement (captures
-from six units, 2026-10-27): **65535** with a signal strength of 65535 when
-there is no echo at all, and **32767** together with the weak signal
-strength that was received (about 140–190 digits) when the echo is too
-weak to measure, typically on beams looking far. `scan.valid_mask()` treats
-0, 65535 and anything above the family's range (so 32767 too) as invalid.
+distance range as 0…32767 mm (RSL 200) and 0…65535 mm (RSL 400); it does
+not define a value for "no measurement". Observed on RSL 235 hardware (seven
+captures, 2026-10-27), two values mark beams without a valid measurement:
+**65535** together with a signal strength of 65535, and **32767** together
+with a real signal strength — 138…149 digits in 98 % of the samples, where
+ordinary beams read about 290…850, the rest up to 607. The second marker
+appears on beams that otherwise measure between 4.7 m and 24 m or never
+return a distance, which fits an echo too weak or too ambiguous to range;
+that interpretation is ours, not Leuze's. `scan.valid_mask()` treats 0, 65535 and anything above the family's
+range (so 32767 too) as invalid.
 
 A capture from real RSL 235 hardware (56-byte status + single 1104-byte
 distance+signal datagram = 271 beams per cycle, i.e. the full-range contour
@@ -231,17 +291,28 @@ distance+signal datagram = 271 beams per cycle, i.e. the full-range contour
 50 04 00 00 08 00 06 00 04 0b 01 32 03 00 00 00 ...   ID 3, 1104 B
 ```
 
-Observed on six RSL 235 units with *telegram interval* 1 (every 25 ms
-scan): the scan counter advances at 40 Hz, but some cycles are never
-transmitted (a 48 ms gap, both telegrams missing). The rate is a property
-of the unit, from 1 in 400 cycles to every 11th cycle, and the gaps of
-different units do not coincide, so they are not receiver drops. The
-receiver reports them in `stats.cycles_missed`; they are not reassembly
-failures. Each configured unit reports its own non-zero `signature`
-(SAFE_SIG), an unconfigured device (`operating_mode` 0) sends 0, and
-`error_class` / `error_number` carried values (73 / 1259) with the ERROR
-bit clear on every unit, so they describe the latest event rather than an
-active error.
+Further observations on those RSL 235 units (not in the specification):
+
+- With *telegram interval* 1 the scan counter advances every 25 ms, but some
+  cycles are never transmitted: a gap of about 50 ms in which the status and
+  the measurement telegram are both missing, never just one of them. In four
+  of the seven captures the withheld scan numbers are exactly **12** apart
+  or a multiple of 12 (a 300 ms raster in the scanner's own counter: every
+  slot in two captures, every second or third in two others); a fifth shows
+  spacings of 11…13, and two contain a single gap in 10 s. A pattern locked
+  to the device's counter points to the device, not the network. The
+  receiver reports these cycles in `stats["cycles_missed"]`; they are not
+  reassembly failures.
+- WARNING, SCREEN and SCREEN_WARNING were always set together: one unit
+  reported an optics cover warning in every scan, one intermittently, one in
+  2 of 399 scans; the OSSDs stayed on. `python -m leuze_rsl` and
+  `examples/replay_udt.py` print such warnings.
+- Each configured unit reports its own non-zero `signature` (SAFE_SIG); an
+  unconfigured device (`operating_mode` 0) sends 0.
+- `error_class` was 73 on every unit and `error_number` 0, 1258 or 1259,
+  constant per unit and across a power cycle, with the ERROR bit clear. A
+  non-zero value therefore does not indicate an active error; what it does
+  indicate is not documented.
 
 ---
 
@@ -354,8 +425,10 @@ The suite covers both wire formats byte for byte (including frames replayed
 from an RSL 235 hardware capture and an RSL 400 capture from Leuze's ROS
 driver), the scan assemblers (corruption, loss, duplicates, resync,
 fragmentation, wraparound, scanner restart) and the full receivers/drivers
-against the simulators over real sockets, on Python 3.9 – 3.13. CI runs it
-on Linux, macOS and Windows.
+against the simulators over real sockets, on Python 3.9 – 3.14. CI runs it
+on Linux, macOS and Windows. Both status tables are checked bit by bit
+against tables written from the specification, and the regression tests
+include the sequences found by exhaustive model checking of the assembler.
 
 ## License
 
